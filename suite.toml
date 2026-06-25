@@ -1,5 +1,5 @@
 name = "aws-athena-read"
-description = "Read-path access to AWS Athena. Run and inspect Athena queries, fetch query results, and browse Glue Data Catalog metadata across databases, tables, work groups, and data catalogs."
+description = "Read-path access to AWS Athena. Run and inspect Athena queries, fetch query results, and browse Glue Data Catalog metadata across databases, tables, work groups, and data catalogs. Cancelling a running query is the one approval-gated write in the suite; every other action reads."
 
 actions = [
   "actions/start-query-execution",
