@@ -226,13 +226,34 @@ read results.
 
 ## Binding setup
 
-Bind a static AWS access key for the `aws_sigv4` credential kind:
+The end-to-end demo path installs the connector and an action, binds a
+static AWS access key for the `aws_sigv4` credential kind, then launches
+your agent:
 
 ```sh
-aileron binding setup github://ALRubinger/aileron-connector-athena
+# Install the connector and an action. Replace <version> with a tag
+# from the releases page. The Aileron resolver requires a pinned
+# version per ADR-0004 — there is no `latest` channel.
+aileron connector install github://ALRubinger/aileron-connector-athena@<version>
+aileron action add github://ALRubinger/aileron-connector-athena/actions/start-query-execution@<version>
+
+# Bind the static AWS access key for the aws_sigv4 credential kind.
+# The setup prompts for access_key_id, region, and service (see below);
+# the secret access key is stored vault-only and the connector never
+# sees it.
+aileron binding setup github://ALRubinger/aileron-connector-athena@<version>
+
+# Launch your agent. Aileron exposes the action via MCP.
+aileron launch claude
+
+# In the agent: "run SELECT count(*) FROM my_db.my_table in Athena"
+# The LLM picks start_query_execution, Aileron executes it in the WASM
+# sandbox with the bound credential after the SQL passes the read-only
+# gate, and returns the QueryExecutionId to poll.
 ```
 
-The setup prompts for the binding fields the manifest declares:
+The `aileron binding setup` step prompts for the binding fields the
+manifest declares:
 
 - `access_key_id`: the AWS access key id. This is the NON-secret half
   of the key pair, the public identifier. It is safe to record. The
