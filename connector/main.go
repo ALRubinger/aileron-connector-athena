@@ -36,6 +36,13 @@
 //	 "args": {"region": "us-east-1", "QueryExecutionId": "..."}}
 //	  → {"output": {"QueryExecution": {"Status": {"State": "SUCCEEDED"}, ...}}}
 //
+// The connector exposes all 14 read-path Athena ops: start_query_execution,
+// get_query_execution, get_query_results, stop_query_execution,
+// list_query_executions, batch_get_query_execution, list_databases,
+// get_database, list_table_metadata, get_table_metadata, list_work_groups,
+// get_work_group, list_data_catalogs, and get_data_catalog. Each routes
+// through doSignedAthena with its X-Amz-Target and a region arg.
+//
 // Every op requires a `region` arg. There is no default region: a missing
 // `region` is a connector_runtime_error raised before any host call. The
 // region MUST equal the region pinned in manifest.toml's
@@ -123,10 +130,75 @@ func main() {
 		startQueryExecution(in.Args)
 	case "get_query_execution":
 		getQueryExecution(in.Args)
+	case "get_query_results":
+		getQueryResults(in.Args)
+	case "stop_query_execution":
+		stopQueryExecution(in.Args)
+	case "list_query_executions":
+		listQueryExecutions(in.Args)
+	case "batch_get_query_execution":
+		batchGetQueryExecution(in.Args)
+	case "list_databases":
+		listDatabases(in.Args)
+	case "get_database":
+		getDatabase(in.Args)
+	case "list_table_metadata":
+		listTableMetadata(in.Args)
+	case "get_table_metadata":
+		getTableMetadata(in.Args)
+	case "list_work_groups":
+		listWorkGroups(in.Args)
+	case "get_work_group":
+		getWorkGroup(in.Args)
+	case "list_data_catalogs":
+		listDataCatalogs(in.Args)
+	case "get_data_catalog":
+		getDataCatalog(in.Args)
 	default:
 		writeError("connector_runtime_error", "unknown op: "+in.Op)
 		os.Exit(1)
 	}
+}
+
+// bodyBuilder turns an op's args into an AWS-JSON-1.1 request body (or a
+// required-arg error), matching every build* function's signature in
+// helpers.go. The dispatch helper takes one so each op routes through a
+// single shared signed-call path.
+type bodyBuilder func(map[string]any) ([]byte, error)
+
+// dispatch is the shared per-op pipeline: resolve the required region,
+// build the body host-testably (returning a required-arg error before any
+// host call), issue the signed Athena call via doSignedAthena (which marks
+// every request credential: "aws_sigv4" and prefixes "AmazonAthena."),
+// map a non-2xx to external_api_error, then parse and emit the response.
+// Every error message is prefixed with the op name. `target` is the bare
+// Athena action (e.g. "GetQueryResults").
+func dispatch(op, target string, args map[string]any, build bodyBuilder) {
+	region, err := resolveRegion(args)
+	if err != nil {
+		writeError("connector_runtime_error", op+": "+err.Error())
+		return
+	}
+	body, err := build(args)
+	if err != nil {
+		writeError("connector_runtime_error", op+": "+err.Error())
+		return
+	}
+	respBody, status, err := doSignedAthena(region, target, body)
+	if err != nil {
+		writeError("connector_runtime_error", op+": "+err.Error())
+		return
+	}
+	if status < 200 || status >= 300 {
+		writeError("external_api_error", fmt.Sprintf("Athena API returned %d: %s", status, string(respBody)))
+		return
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		writeError("connector_runtime_error", op+": parse: "+err.Error())
+		return
+	}
+	writeOutput(parsed)
 }
 
 // startQueryExecution maps op start_query_execution → Athena's
@@ -135,31 +207,7 @@ func main() {
 // get_query_execution. The request body is built host-testably in
 // helpers.go.
 func startQueryExecution(args map[string]any) {
-	region, err := resolveRegion(args)
-	if err != nil {
-		writeError("connector_runtime_error", "start_query_execution: "+err.Error())
-		return
-	}
-	body, err := buildStartQueryExecution(args)
-	if err != nil {
-		writeError("connector_runtime_error", "start_query_execution: "+err.Error())
-		return
-	}
-	respBody, status, err := doSignedAthena(region, "StartQueryExecution", body)
-	if err != nil {
-		writeError("connector_runtime_error", "start_query_execution: "+err.Error())
-		return
-	}
-	if status < 200 || status >= 300 {
-		writeError("external_api_error", fmt.Sprintf("Athena API returned %d: %s", status, string(respBody)))
-		return
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		writeError("connector_runtime_error", "start_query_execution: parse: "+err.Error())
-		return
-	}
-	writeOutput(parsed)
+	dispatch("start_query_execution", "StartQueryExecution", args, buildStartQueryExecution)
 }
 
 // getQueryExecution maps op get_query_execution → Athena's
@@ -167,31 +215,84 @@ func startQueryExecution(args map[string]any) {
 // previously submitted with start_query_execution. The request body is
 // built host-testably in helpers.go.
 func getQueryExecution(args map[string]any) {
-	region, err := resolveRegion(args)
-	if err != nil {
-		writeError("connector_runtime_error", "get_query_execution: "+err.Error())
-		return
-	}
-	body, err := buildGetQueryExecution(args)
-	if err != nil {
-		writeError("connector_runtime_error", "get_query_execution: "+err.Error())
-		return
-	}
-	respBody, status, err := doSignedAthena(region, "GetQueryExecution", body)
-	if err != nil {
-		writeError("connector_runtime_error", "get_query_execution: "+err.Error())
-		return
-	}
-	if status < 200 || status >= 300 {
-		writeError("external_api_error", fmt.Sprintf("Athena API returned %d: %s", status, string(respBody)))
-		return
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		writeError("connector_runtime_error", "get_query_execution: parse: "+err.Error())
-		return
-	}
-	writeOutput(parsed)
+	dispatch("get_query_execution", "GetQueryExecution", args, buildGetQueryExecution)
+}
+
+// getQueryResults maps op get_query_results → Athena's GetQueryResults
+// action. It pages the result rows of a SUCCEEDED query.
+func getQueryResults(args map[string]any) {
+	dispatch("get_query_results", "GetQueryResults", args, buildGetQueryResults)
+}
+
+// stopQueryExecution maps op stop_query_execution → Athena's
+// StopQueryExecution action. It cancels a running query. (Write/gated
+// effect is declared in actions/stop-query-execution/action.md, issue #8;
+// no gating logic lives here.)
+func stopQueryExecution(args map[string]any) {
+	dispatch("stop_query_execution", "StopQueryExecution", args, buildStopQueryExecution)
+}
+
+// listQueryExecutions maps op list_query_executions → Athena's
+// ListQueryExecutions action. It lists query-execution ids, optionally
+// scoped to a work group, with paging.
+func listQueryExecutions(args map[string]any) {
+	dispatch("list_query_executions", "ListQueryExecutions", args, buildListQueryExecutions)
+}
+
+// batchGetQueryExecution maps op batch_get_query_execution → Athena's
+// BatchGetQueryExecution action. It fetches details for a batch of
+// query-execution ids.
+func batchGetQueryExecution(args map[string]any) {
+	dispatch("batch_get_query_execution", "BatchGetQueryExecution", args, buildBatchGetQueryExecution)
+}
+
+// listDatabases maps op list_databases → Athena's ListDatabases action.
+// It lists databases in a data catalog, with paging.
+func listDatabases(args map[string]any) {
+	dispatch("list_databases", "ListDatabases", args, buildListDatabases)
+}
+
+// getDatabase maps op get_database → Athena's GetDatabase action. It
+// returns metadata for one database in a data catalog.
+func getDatabase(args map[string]any) {
+	dispatch("get_database", "GetDatabase", args, buildGetDatabase)
+}
+
+// listTableMetadata maps op list_table_metadata → Athena's
+// ListTableMetadata action. It lists table metadata in a database,
+// optionally filtered by an expression, with paging.
+func listTableMetadata(args map[string]any) {
+	dispatch("list_table_metadata", "ListTableMetadata", args, buildListTableMetadata)
+}
+
+// getTableMetadata maps op get_table_metadata → Athena's GetTableMetadata
+// action. It returns metadata for one table.
+func getTableMetadata(args map[string]any) {
+	dispatch("get_table_metadata", "GetTableMetadata", args, buildGetTableMetadata)
+}
+
+// listWorkGroups maps op list_work_groups → Athena's ListWorkGroups
+// action. It lists work groups, with paging.
+func listWorkGroups(args map[string]any) {
+	dispatch("list_work_groups", "ListWorkGroups", args, buildListWorkGroups)
+}
+
+// getWorkGroup maps op get_work_group → Athena's GetWorkGroup action. It
+// returns the configuration of one work group.
+func getWorkGroup(args map[string]any) {
+	dispatch("get_work_group", "GetWorkGroup", args, buildGetWorkGroup)
+}
+
+// listDataCatalogs maps op list_data_catalogs → Athena's ListDataCatalogs
+// action. It lists registered data catalogs, with paging.
+func listDataCatalogs(args map[string]any) {
+	dispatch("list_data_catalogs", "ListDataCatalogs", args, buildListDataCatalogs)
+}
+
+// getDataCatalog maps op get_data_catalog → Athena's GetDataCatalog
+// action. It returns the configuration of one data catalog.
+func getDataCatalog(args map[string]any) {
+	dispatch("get_data_catalog", "GetDataCatalog", args, buildGetDataCatalog)
 }
 
 // doSignedAthena is the single shared signed caller for every Athena
