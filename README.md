@@ -40,7 +40,9 @@ Layer 1 remains the backstop in every case.
 
 `stop_query_execution` is the one action in the suite that contacts
 Athena to change server-side state. It cancels a running query. Because
-its `action.md` declares `effect: write` with `[approval] required = true`,
+its `action.md` declares `[approval] required = true` (the manifest has
+no `effect =` key — this README's write/gated categorization is editorial,
+derived from the presence of that `[approval]` block),
 the runtime pauses the call and asks the user to approve via the
 launch-comms channel (the CLI prompt or the webapp approvals surface)
 before dispatching to Athena. On denial the connector is never invoked
