@@ -492,10 +492,11 @@ var readOnlyLeadingKeywords = map[string]bool{
 // followed by more non-trivial SQL) are rejected; a single trailing
 // semicolon (optionally followed by whitespace/comments) is allowed.
 //
-// Known limitations (accepted, by design — not a parser): a ";" embedded
-// inside a string literal or a comment is treated structurally and may
-// trip the stacked-statement check; the IAM principal remains the
-// backstop in every case.
+// The stacked-statement check is comment- and string-literal-aware: a ";"
+// inside a "--" line comment, a "/* */" block comment, or a single-quoted
+// string literal (with doubled-quote escaping) is not treated as a statement
+// terminator, so it does not false-reject an otherwise valid read query.
+// The IAM principal remains the backstop in every case.
 func validateReadOnlySQL(sql string) error {
 	// Stacked-statement gate first: at most one ";", and anything after
 	// it must be only whitespace/comments (a bare trailing semicolon).
@@ -567,18 +568,59 @@ func leadingKeyword(s string) (kw, rest string) {
 	return s[:i], s[i:]
 }
 
-// checkSingleStatement enforces the single-statement rule: it finds the
-// first ";" and rejects if anything other than whitespace and trailing
-// comments follows it (stacked statements). A QueryString with no ";", or
-// one whose only ";" is trailing, passes.
+// checkSingleStatement enforces the single-statement rule. It performs a
+// comment- and string-literal-aware scan for the first statement-terminating
+// ";": it skips over "--" line comments (to newline/EOF), "/* */" block
+// comments, and single-quoted string literals (handling the doubled-quote escape)
+// so that a ";" appearing inside a comment or string literal is never
+// mistaken for a statement terminator. Only a real, structural ";" counts;
+// the statement is rejected when such a ";" is followed by non-whitespace,
+// non-comment text (a stacked statement). A QueryString with no structural
+// ";", or one whose only structural ";" is trailing, passes.
 func checkSingleStatement(sql string) error {
-	i := strings.IndexByte(sql, ';')
-	if i < 0 {
-		return nil
-	}
-	tail := stripLeadingNoise(sql[i+1:])
-	if tail != "" {
-		return fmt.Errorf("read-only gate: multiple SQL statements are not allowed (only a single read-only statement, with an optional trailing semicolon)")
+	for i := 0; i < len(sql); {
+		switch {
+		case strings.HasPrefix(sql[i:], "--"):
+			// Line comment: skip to end of line (or EOF).
+			if j := strings.IndexByte(sql[i:], '\n'); j >= 0 {
+				i += j + 1
+			} else {
+				return nil // comment (and any ";" in it) runs to EOF
+			}
+		case strings.HasPrefix(sql[i:], "/*"):
+			// Block comment: skip to closing "*/" (or EOF).
+			if j := strings.Index(sql[i+2:], "*/"); j >= 0 {
+				i += 2 + j + 2
+			} else {
+				return nil // unterminated block comment runs to EOF
+			}
+		case sql[i] == '\'':
+			// Single-quoted string literal: skip to the closing quote,
+			// treating a doubled '' as an escaped quote (not a close).
+			i++
+			for i < len(sql) {
+				if sql[i] == '\'' {
+					if i+1 < len(sql) && sql[i+1] == '\'' {
+						i += 2 // escaped quote, stay in the literal
+						continue
+					}
+					i++ // closing quote
+					break
+				}
+				i++
+			}
+		case sql[i] == ';':
+			// A real, structural statement terminator. Anything after it
+			// other than whitespace and trailing comments is a stacked
+			// statement.
+			tail := stripLeadingNoise(sql[i+1:])
+			if tail != "" {
+				return fmt.Errorf("read-only gate: multiple SQL statements are not allowed (only a single read-only statement, with an optional trailing semicolon)")
+			}
+			return nil
+		default:
+			i++
+		}
 	}
 	return nil
 }
