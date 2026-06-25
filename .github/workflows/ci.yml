@@ -54,6 +54,22 @@ jobs:
       - name: Verify wasip1 build
         run: task test:wasip1
 
+  manifest:
+    name: Manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate manifest invariants
+        # Stdlib-only (python3 tomllib) so the manifest regression guard
+        # carries no Go TOML dependency, per the aileron-family
+        # convention. Asserts the aws_sigv4/athena credential kind, the
+        # region pin agreeing between the network host and the
+        # credential, the absence of OAuth-style keys, and no embedded
+        # CR/LF in string fields. Ubuntu runners ship Python >= 3.11, so
+        # tomllib is available without setup-python.
+        run: python3 scripts/validate_manifest.py
+
   vet:
     name: Vet
     runs-on: ubuntu-latest
