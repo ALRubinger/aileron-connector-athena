@@ -1,0 +1,19 @@
+name = "aws-athena-read"
+description = "Read-path access to AWS Athena. Run and inspect Athena queries, fetch query results, and browse Glue Data Catalog metadata across databases, tables, work groups, and data catalogs."
+
+actions = [
+  "actions/start-query-execution",
+  "actions/get-query-execution",
+  "actions/get-query-results",
+  "actions/stop-query-execution",
+  "actions/list-query-executions",
+  "actions/batch-get-query-execution",
+  "actions/list-databases",
+  "actions/get-database",
+  "actions/list-table-metadata",
+  "actions/get-table-metadata",
+  "actions/list-work-groups",
+  "actions/get-work-group",
+  "actions/list-data-catalogs",
+  "actions/get-data-catalog",
+]

@@ -1,0 +1,43 @@
+name: Release
+
+# Atomic release: one push of a `vX.Y.Z` tag produces the connector
+# tarball (under tag `vX.Y.Z`) AND every action tarball (under tag
+# `actions/<name>/vX.Y.Z`), all pinned to the same connector content
+# hash.
+#
+# The pipeline is implemented as composite actions in
+# github.com/ALRubinger/aileron-actions. Each `uses:` is SHA-pinned for
+# supply-chain trust — a retag of the upstream actions repo cannot
+# change what runs against this repo's signing key. See that repo's
+# README for the contract each action expects from the connector source
+# layout.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ALRubinger/aileron-actions/actions/setup-go-wasm@114e7470b97ea98816e8910231e59e0b5d54030b
+
+      - uses: ALRubinger/aileron-actions/actions/build-wasm-connector@114e7470b97ea98816e8910231e59e0b5d54030b
+
+      - id: connector
+        uses: ALRubinger/aileron-actions/actions/sign-and-publish@114e7470b97ea98816e8910231e59e0b5d54030b
+        with:
+          signing-key: ${{ secrets.AILERON_SIGNING_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: ALRubinger/aileron-actions/actions/publish-action-subpaths@114e7470b97ea98816e8910231e59e0b5d54030b
+        with:
+          signing-key: ${{ secrets.AILERON_SIGNING_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          connector-hash: ${{ steps.connector.outputs.connector-hash }}

@@ -1,0 +1,74 @@
+name: CI
+
+# Runs on every push to main and every PR. Exercises the test layers
+# defined in the Taskfile (`task test`):
+#   - test:unit    — go test against the pure helpers (host platform)
+#   - test:wasip1  — verify the connector still compiles for wasip1
+#
+# Live API integration is deliberately out of scope here — that path
+# requires real AWS credentials and runs through the
+# aileron-connector-dev-run harness in the Aileron repo, which is a
+# manual developer tool, not a CI gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: connector/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run unit tests
+        run: task test:unit
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron-connector-athena
+          files: ./connector/coverage.out
+
+      - name: Verify wasip1 build
+        run: task test:wasip1
+
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: connector/go.mod
+
+      - name: go vet (host platform)
+        # The host platform skips main.go (//go:build wasip1) and vets
+        # only the helpers + helpers_test.go. The wasip1 path is covered
+        # separately by 'test:wasip1' which runs `go build` for that
+        # target and would surface any vet-level issues.
+        working-directory: connector
+        run: go vet ./...

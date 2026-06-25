@@ -1,0 +1,21 @@
+# Build artifacts
+connector.wasm
+connector-payload.bin
+connector-payload.sig
+action-payload.sig
+aileron.tar.gz
+aileron-action-*.tar.gz
+aileron-action.tar.gz
+
+# Task — checksum cache for sources/generates
+.task/
+
+# Go
+*.test
+*.out
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
