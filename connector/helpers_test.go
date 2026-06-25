@@ -284,3 +284,386 @@ func TestBuildGetQueryExecution_Body(t *testing.T) {
 		t.Fatalf("body should carry only QueryExecutionId, got %v", m)
 	}
 }
+
+// --- Shared arg helpers (Unit 1) ----------------------------------------
+
+func TestOptionalString(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   map[string]any
+		want   string
+		wantOk bool
+	}{
+		{"present", map[string]any{"k": "v"}, "v", true},
+		{"absent", map[string]any{}, "", false},
+		{"empty", map[string]any{"k": ""}, "", false},
+		{"wrong type", map[string]any{"k": 42}, "", false},
+		{"nil", map[string]any{"k": nil}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := optionalString(tc.args, "k")
+			if ok != tc.wantOk || got != tc.want {
+				t.Fatalf("got (%q,%v), want (%q,%v)", got, ok, tc.want, tc.wantOk)
+			}
+		})
+	}
+}
+
+func TestRequireStringSlice(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		got, err := requireStringSlice(map[string]any{"ids": []any{"a", "b"}}, "ids")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+			t.Fatalf("got %v, want [a b]", got)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		if _, err := requireStringSlice(map[string]any{}, "ids"); err == nil {
+			t.Fatal("expected error for missing key")
+		}
+	})
+	t.Run("empty array", func(t *testing.T) {
+		if _, err := requireStringSlice(map[string]any{"ids": []any{}}, "ids"); err == nil {
+			t.Fatal("expected error for empty array")
+		}
+	})
+	t.Run("not an array", func(t *testing.T) {
+		if _, err := requireStringSlice(map[string]any{"ids": "a"}, "ids"); err == nil {
+			t.Fatal("expected error for non-array")
+		}
+	})
+	t.Run("element not string", func(t *testing.T) {
+		if _, err := requireStringSlice(map[string]any{"ids": []any{"a", 42}}, "ids"); err == nil {
+			t.Fatal("expected error for non-string element")
+		}
+	})
+	t.Run("element empty string", func(t *testing.T) {
+		if _, err := requireStringSlice(map[string]any{"ids": []any{"a", ""}}, "ids"); err == nil {
+			t.Fatal("expected error for empty-string element")
+		}
+	})
+}
+
+func TestApplyPaging(t *testing.T) {
+	t.Run("both present", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{"MaxResults": float64(50), "NextToken": "tok"})
+		if p["MaxResults"] != float64(50) {
+			t.Fatalf("MaxResults = %v (%T), want 50", p["MaxResults"], p["MaxResults"])
+		}
+		if p["NextToken"] != "tok" {
+			t.Fatalf("NextToken = %v, want tok", p["NextToken"])
+		}
+	})
+	t.Run("both absent", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{})
+		if _, ok := p["MaxResults"]; ok {
+			t.Fatal("MaxResults should be omitted when absent")
+		}
+		if _, ok := p["NextToken"]; ok {
+			t.Fatal("NextToken should be omitted when absent")
+		}
+	})
+	t.Run("empty NextToken omitted", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{"NextToken": ""})
+		if _, ok := p["NextToken"]; ok {
+			t.Fatal("empty NextToken should be omitted")
+		}
+	})
+	t.Run("MaxResults survives JSON round-trip as a number", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{"MaxResults": float64(25)})
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var back map[string]any
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if back["MaxResults"] != float64(25) {
+			t.Fatalf("round-tripped MaxResults = %v (%T), want 25", back["MaxResults"], back["MaxResults"])
+		}
+	})
+	t.Run("MaxResults tolerates int and json.Number", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{"MaxResults": 10})
+		if p["MaxResults"] != float64(10) {
+			t.Fatalf("int MaxResults = %v, want 10", p["MaxResults"])
+		}
+		p2 := map[string]any{}
+		applyPaging(p2, map[string]any{"MaxResults": json.Number("99")})
+		if p2["MaxResults"] != float64(99) {
+			t.Fatalf("json.Number MaxResults = %v, want 99", p2["MaxResults"])
+		}
+	})
+	t.Run("non-numeric MaxResults omitted", func(t *testing.T) {
+		p := map[string]any{}
+		applyPaging(p, map[string]any{"MaxResults": "lots"})
+		if _, ok := p["MaxResults"]; ok {
+			t.Fatal("non-numeric MaxResults should be omitted")
+		}
+	})
+}
+
+// --- The 12 new builders (Unit 2) ---------------------------------------
+
+func TestBuildGetQueryResults(t *testing.T) {
+	t.Run("requires id", func(t *testing.T) {
+		if _, err := buildGetQueryResults(map[string]any{}); err == nil {
+			t.Fatal("expected error when QueryExecutionId missing")
+		}
+		if _, err := buildGetQueryResults(map[string]any{"QueryExecutionId": ""}); err == nil {
+			t.Fatal("expected error when QueryExecutionId empty")
+		}
+	})
+	t.Run("id only", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetQueryResults, map[string]any{"QueryExecutionId": "q1"}))
+		if m["QueryExecutionId"] != "q1" || len(m) != 1 {
+			t.Fatalf("got %v, want only {QueryExecutionId:q1}", m)
+		}
+	})
+	t.Run("with paging", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetQueryResults, map[string]any{
+			"QueryExecutionId": "q1", "MaxResults": float64(10), "NextToken": "n",
+		}))
+		if m["MaxResults"] != float64(10) || m["NextToken"] != "n" {
+			t.Fatalf("paging not included: %v", m)
+		}
+	})
+}
+
+func TestBuildStopQueryExecution(t *testing.T) {
+	t.Run("requires id", func(t *testing.T) {
+		if _, err := buildStopQueryExecution(map[string]any{}); err == nil {
+			t.Fatal("expected error when QueryExecutionId missing")
+		}
+		if _, err := buildStopQueryExecution(map[string]any{"QueryExecutionId": ""}); err == nil {
+			t.Fatal("expected error when QueryExecutionId empty")
+		}
+	})
+	t.Run("body", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildStopQueryExecution, map[string]any{"QueryExecutionId": "q1"}))
+		if m["QueryExecutionId"] != "q1" || len(m) != 1 {
+			t.Fatalf("got %v, want only {QueryExecutionId:q1}", m)
+		}
+	})
+}
+
+func TestBuildListQueryExecutions(t *testing.T) {
+	t.Run("empty args yields empty object", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListQueryExecutions, map[string]any{}))
+		if len(m) != 0 {
+			t.Fatalf("expected empty object, got %v", m)
+		}
+	})
+	t.Run("workgroup and paging", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListQueryExecutions, map[string]any{
+			"WorkGroup": "primary", "MaxResults": float64(5), "NextToken": "n",
+		}))
+		if m["WorkGroup"] != "primary" || m["MaxResults"] != float64(5) || m["NextToken"] != "n" {
+			t.Fatalf("optionals not included: %v", m)
+		}
+	})
+	t.Run("empty workgroup omitted", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListQueryExecutions, map[string]any{"WorkGroup": ""}))
+		if _, ok := m["WorkGroup"]; ok {
+			t.Fatal("empty WorkGroup should be omitted")
+		}
+	})
+}
+
+func TestBuildBatchGetQueryExecution(t *testing.T) {
+	t.Run("valid slice produces array body", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildBatchGetQueryExecution, map[string]any{
+			"QueryExecutionIds": []any{"a", "b"},
+		}))
+		arr, ok := m["QueryExecutionIds"].([]any)
+		if !ok || len(arr) != 2 || arr[0] != "a" || arr[1] != "b" {
+			t.Fatalf("QueryExecutionIds = %v, want [a b]", m["QueryExecutionIds"])
+		}
+	})
+	t.Run("missing rejected", func(t *testing.T) {
+		if _, err := buildBatchGetQueryExecution(map[string]any{}); err == nil {
+			t.Fatal("expected error when QueryExecutionIds missing")
+		}
+	})
+	t.Run("empty rejected", func(t *testing.T) {
+		if _, err := buildBatchGetQueryExecution(map[string]any{"QueryExecutionIds": []any{}}); err == nil {
+			t.Fatal("expected error when QueryExecutionIds empty")
+		}
+	})
+	t.Run("non-string element rejected", func(t *testing.T) {
+		if _, err := buildBatchGetQueryExecution(map[string]any{"QueryExecutionIds": []any{"a", 1}}); err == nil {
+			t.Fatal("expected error for non-string element")
+		}
+	})
+}
+
+func TestBuildListDatabases(t *testing.T) {
+	t.Run("requires catalog", func(t *testing.T) {
+		if _, err := buildListDatabases(map[string]any{}); err == nil {
+			t.Fatal("expected error when CatalogName missing")
+		}
+	})
+	t.Run("with paging", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListDatabases, map[string]any{
+			"CatalogName": "AwsDataCatalog", "MaxResults": float64(3), "NextToken": "n",
+		}))
+		if m["CatalogName"] != "AwsDataCatalog" || m["MaxResults"] != float64(3) || m["NextToken"] != "n" {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildGetDatabase(t *testing.T) {
+	t.Run("requires both", func(t *testing.T) {
+		if _, err := buildGetDatabase(map[string]any{"CatalogName": "c"}); err == nil {
+			t.Fatal("expected error when DatabaseName missing")
+		}
+		if _, err := buildGetDatabase(map[string]any{"DatabaseName": "d"}); err == nil {
+			t.Fatal("expected error when CatalogName missing")
+		}
+	})
+	t.Run("body", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetDatabase, map[string]any{"CatalogName": "c", "DatabaseName": "d"}))
+		if m["CatalogName"] != "c" || m["DatabaseName"] != "d" || len(m) != 2 {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildListTableMetadata(t *testing.T) {
+	t.Run("requires catalog and database", func(t *testing.T) {
+		if _, err := buildListTableMetadata(map[string]any{"CatalogName": "c"}); err == nil {
+			t.Fatal("expected error when DatabaseName missing")
+		}
+		if _, err := buildListTableMetadata(map[string]any{"DatabaseName": "d"}); err == nil {
+			t.Fatal("expected error when CatalogName missing")
+		}
+	})
+	t.Run("optionals included", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListTableMetadata, map[string]any{
+			"CatalogName": "c", "DatabaseName": "d", "Expression": "foo*",
+			"MaxResults": float64(7), "NextToken": "n",
+		}))
+		if m["Expression"] != "foo*" || m["MaxResults"] != float64(7) || m["NextToken"] != "n" {
+			t.Fatalf("optionals missing: %v", m)
+		}
+	})
+	t.Run("empty expression omitted", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListTableMetadata, map[string]any{
+			"CatalogName": "c", "DatabaseName": "d", "Expression": "",
+		}))
+		if _, ok := m["Expression"]; ok {
+			t.Fatal("empty Expression should be omitted")
+		}
+	})
+}
+
+func TestBuildGetTableMetadata(t *testing.T) {
+	t.Run("requires all three", func(t *testing.T) {
+		if _, err := buildGetTableMetadata(map[string]any{"CatalogName": "c", "DatabaseName": "d"}); err == nil {
+			t.Fatal("expected error when TableName missing")
+		}
+		if _, err := buildGetTableMetadata(map[string]any{"CatalogName": "c", "TableName": "t"}); err == nil {
+			t.Fatal("expected error when DatabaseName missing")
+		}
+		if _, err := buildGetTableMetadata(map[string]any{"DatabaseName": "d", "TableName": "t"}); err == nil {
+			t.Fatal("expected error when CatalogName missing")
+		}
+	})
+	t.Run("body", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetTableMetadata, map[string]any{
+			"CatalogName": "c", "DatabaseName": "d", "TableName": "t",
+		}))
+		if m["CatalogName"] != "c" || m["DatabaseName"] != "d" || m["TableName"] != "t" || len(m) != 3 {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildListWorkGroups(t *testing.T) {
+	t.Run("empty args yields empty object", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListWorkGroups, map[string]any{}))
+		if len(m) != 0 {
+			t.Fatalf("expected empty object, got %v", m)
+		}
+	})
+	t.Run("with paging", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListWorkGroups, map[string]any{"MaxResults": float64(2), "NextToken": "n"}))
+		if m["MaxResults"] != float64(2) || m["NextToken"] != "n" {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildGetWorkGroup(t *testing.T) {
+	t.Run("requires workgroup", func(t *testing.T) {
+		if _, err := buildGetWorkGroup(map[string]any{}); err == nil {
+			t.Fatal("expected error when WorkGroup missing")
+		}
+	})
+	t.Run("body", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetWorkGroup, map[string]any{"WorkGroup": "primary"}))
+		if m["WorkGroup"] != "primary" || len(m) != 1 {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildListDataCatalogs(t *testing.T) {
+	t.Run("empty args yields empty object", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListDataCatalogs, map[string]any{}))
+		if len(m) != 0 {
+			t.Fatalf("expected empty object, got %v", m)
+		}
+	})
+	t.Run("with paging", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildListDataCatalogs, map[string]any{"MaxResults": float64(4), "NextToken": "n"}))
+		if m["MaxResults"] != float64(4) || m["NextToken"] != "n" {
+			t.Fatalf("got %v", m)
+		}
+	})
+}
+
+func TestBuildGetDataCatalog(t *testing.T) {
+	t.Run("requires name", func(t *testing.T) {
+		if _, err := buildGetDataCatalog(map[string]any{}); err == nil {
+			t.Fatal("expected error when Name missing")
+		}
+	})
+	t.Run("name only", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetDataCatalog, map[string]any{"Name": "cat"}))
+		if m["Name"] != "cat" || len(m) != 1 {
+			t.Fatalf("got %v", m)
+		}
+	})
+	t.Run("optional workgroup", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetDataCatalog, map[string]any{"Name": "cat", "WorkGroup": "primary"}))
+		if m["WorkGroup"] != "primary" {
+			t.Fatalf("WorkGroup missing: %v", m)
+		}
+	})
+	t.Run("empty workgroup omitted", func(t *testing.T) {
+		m := unmarshalBody(t, mustBuild(t, buildGetDataCatalog, map[string]any{"Name": "cat", "WorkGroup": ""}))
+		if _, ok := m["WorkGroup"]; ok {
+			t.Fatal("empty WorkGroup should be omitted")
+		}
+	})
+}
+
+// mustBuild runs a builder and fails the test on error, returning the body.
+func mustBuild(t *testing.T, build func(map[string]any) ([]byte, error), args map[string]any) []byte {
+	t.Helper()
+	b, err := build(args)
+	if err != nil {
+		t.Fatalf("unexpected build error: %v", err)
+	}
+	return b
+}
