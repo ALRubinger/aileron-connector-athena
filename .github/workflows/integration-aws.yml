@@ -1,0 +1,80 @@
+name: Integration (AWS)
+
+# LIVE, real-AWS Athena round-trip test. This is a MANUAL job: it runs ONLY
+# on workflow_dispatch — never on push or pull_request — so the default CI
+# gate (ci.yml) stays free of live credentials and is unaffected. It mirrors
+# aileron's `integration_sandbox` pattern: the test in
+# connector/integration_aws_test.go is gated behind the `athena_integration`
+# build tag and performs a signed StartQueryExecution -> poll
+# get_query_execution -> GetQueryResults round-trip via the `aws` CLI.
+#
+# The target is expected to be a throwaway, read-only AWS account. The test
+# is read-only by construction (a single SELECT plus reads); it creates,
+# mutates, and deletes nothing.
+#
+# Credentials are supplied by the operator at dispatch time via repository
+# secrets (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY). They are NOT required
+# for any other workflow. ATHENA_INTEGRATION_REGION has no default — the run
+# fails fast if the input is empty.
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "AWS region to run against (e.g. us-east-1). Required — no default."
+        required: true
+        type: string
+      workgroup:
+        description: "Athena work group (optional; defaults to 'primary')."
+        required: false
+        type: string
+      output_location:
+        description: "s3:// result output location (optional; needed only if the work group does not enforce one)."
+        required: false
+        type: string
+      query:
+        description: "Read-only SQL to run (optional; defaults to 'SELECT 1'). Must be read-only — validated by the connector's gate."
+        required: false
+        type: string
+
+concurrency:
+  group: integration-aws
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  integration-aws:
+    name: Live Athena round-trip
+    runs-on: ubuntu-latest
+    environment: integration-aws
+    env:
+      ATHENA_INTEGRATION_REGION: ${{ inputs.region }}
+      ATHENA_INTEGRATION_WORKGROUP: ${{ inputs.workgroup }}
+      ATHENA_INTEGRATION_OUTPUT: ${{ inputs.output_location }}
+      ATHENA_INTEGRATION_QUERY: ${{ inputs.query }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: connector/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The aws CLI is preinstalled on ubuntu-latest GitHub runners; this is
+      # a fail-fast guard so a missing CLI is an obvious error, not a
+      # confusing exec failure inside the test.
+      - name: Verify aws CLI is available
+        run: aws --version
+
+      - name: Run live Athena round-trip
+        run: task test:integration:aws
