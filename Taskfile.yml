@@ -1,5 +1,12 @@
 version: "3"
 
+# Disable the AWS CLI v2 client-side pager for every task. Without this,
+# aws commands that return output (create-bucket, get-user, create-access-key,
+# ...) pipe through a pager (less) and block waiting for the user to quit.
+# Setting AWS_PAGER to empty is the cross-platform way to turn it off.
+env:
+  AWS_PAGER: ""
+
 tasks:
   default:
     desc: List available tasks
@@ -93,3 +100,158 @@ tasks:
     dir: connector
     cmds:
       - go test -tags athena_integration -count=1 -v -run TestIntegrationAthenaRoundTrip ./...
+
+  aws:setup:
+    desc: |
+      Provision the AWS prerequisites for testing the read-only Athena
+      connector: an S3 query-results bucket, the work group's result
+      location, a dedicated read-only IAM user, and that user's inline
+      read-only policy. Idempotent and safe to re-run.
+
+      Cross-platform: uses ONLY the `aws` CLI plus Task's built-in shell
+      (mvdan/sh), so it runs identically on Windows, macOS, and Linux with
+      no bash, sed, jq, or other Unix tooling. Requires the `aws` CLI
+      installed and logged in as a principal allowed to create S3 buckets
+      and IAM users (your admin identity) — distinct from the read-only
+      identity this creates.
+
+      Configured ENTIRELY by environment variables (no CLI vars to pass).
+      Set them once in your shell or a profile, then run `task aws:setup`.
+      The ATHENA_INTEGRATION_* namespace is shared with
+      `task test:integration:aws`, so REGION and WORKGROUP are set once for
+      the whole local-testing flow.
+
+      Required:
+        ATHENA_INTEGRATION_REGION   AWS region, e.g. us-west-1
+        ATHENA_INTEGRATION_BUCKET   globally-unique S3 bucket name (results)
+      Optional (defaults):
+        ATHENA_INTEGRATION_IAM_USER=aileron-athena-readonly
+        ATHENA_INTEGRATION_WORKGROUP=primary
+        ATHENA_INTEGRATION_RESULTS_PREFIX=athena-results
+        ATHENA_INTEGRATION_POLICY_NAME=AthenaReadOnly
+    vars:
+      REGION: '{{.ATHENA_INTEGRATION_REGION | default ""}}'
+      BUCKET: '{{.ATHENA_INTEGRATION_BUCKET | default ""}}'
+      IAM_USER: '{{.ATHENA_INTEGRATION_IAM_USER | default "aileron-athena-readonly"}}'
+      WORKGROUP: '{{.ATHENA_INTEGRATION_WORKGROUP | default "primary"}}'
+      PREFIX: '{{.ATHENA_INTEGRATION_RESULTS_PREFIX | default "athena-results"}}'
+      POLICY_NAME: '{{.ATHENA_INTEGRATION_POLICY_NAME | default "AthenaReadOnly"}}'
+    cmds:
+      - |
+        if [ -z "{{.REGION}}" ] || [ -z "{{.BUCKET}}" ]; then
+          echo "Missing required environment variables. Set these, then re-run 'task aws:setup':"
+          echo "  ATHENA_INTEGRATION_REGION   AWS region, e.g. us-west-1  (also used by 'task test:integration:aws')"
+          echo "  ATHENA_INTEGRATION_BUCKET   globally-unique S3 bucket name for query results"
+          echo ""
+          echo "Optional (defaults shown): ATHENA_INTEGRATION_IAM_USER=aileron-athena-readonly,"
+          echo "  ATHENA_INTEGRATION_WORKGROUP=primary, ATHENA_INTEGRATION_RESULTS_PREFIX=athena-results,"
+          echo "  ATHENA_INTEGRATION_POLICY_NAME=AthenaReadOnly"
+          exit 1
+        fi
+      - |
+        echo "==> [1/4] S3 results bucket: {{.BUCKET}} ({{.REGION}})"
+        if aws s3api head-bucket --bucket "{{.BUCKET}}" --region "{{.REGION}}" >/dev/null 2>&1; then
+          echo "    bucket already exists and is accessible; leaving as-is"
+        elif [ "{{.REGION}}" = "us-east-1" ]; then
+          aws s3api create-bucket --bucket "{{.BUCKET}}" --region us-east-1 --no-cli-pager
+        else
+          aws s3api create-bucket --bucket "{{.BUCKET}}" --region "{{.REGION}}" --create-bucket-configuration LocationConstraint="{{.REGION}}" --no-cli-pager
+        fi
+      - aws s3api put-public-access-block --bucket "{{.BUCKET}}" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+      - |
+        echo "==> [2/4] Point work group '{{.WORKGROUP}}' at s3://{{.BUCKET}}/{{.PREFIX}}/"
+        aws athena update-work-group --work-group "{{.WORKGROUP}}" --region "{{.REGION}}" --configuration-updates 'ResultConfigurationUpdates={OutputLocation=s3://{{.BUCKET}}/{{.PREFIX}}/}'
+      - |
+        echo "==> [3/4] Read-only IAM user: {{.IAM_USER}}"
+        if aws iam get-user --user-name "{{.IAM_USER}}" >/dev/null 2>&1; then
+          echo "    user already exists; leaving as-is"
+        else
+          aws iam create-user --user-name "{{.IAM_USER}}"
+        fi
+      - |
+        echo "==> [4/4] Inline read-only policy: {{.POLICY_NAME}}"
+        aws iam put-user-policy --user-name "{{.IAM_USER}}" --policy-name "{{.POLICY_NAME}}" --policy-document '{"Version":"2012-10-17","Statement":[{"Sid":"AthenaRead","Effect":"Allow","Action":["athena:StartQueryExecution","athena:GetQueryExecution","athena:GetQueryResults","athena:StopQueryExecution","athena:ListQueryExecutions","athena:BatchGetQueryExecution","athena:ListDatabases","athena:GetDatabase","athena:ListTableMetadata","athena:GetTableMetadata","athena:ListWorkGroups","athena:GetWorkGroup","athena:ListDataCatalogs","athena:GetDataCatalog"],"Resource":"*"},{"Sid":"GlueCatalogRead","Effect":"Allow","Action":["glue:GetDatabase","glue:GetDatabases","glue:GetTable","glue:GetTables","glue:GetPartition","glue:GetPartitions"],"Resource":"*"},{"Sid":"AthenaResultsLocation","Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::{{.BUCKET}}","arn:aws:s3:::{{.BUCKET}}/*"]}]}'
+      - |
+        echo ""
+        echo "Setup complete."
+        echo "  region    : {{.REGION}}"
+        echo "  results   : s3://{{.BUCKET}}/{{.PREFIX}}/"
+        echo "  workgroup : {{.WORKGROUP}}"
+        echo "  IAM user  : {{.IAM_USER}} (read-only)"
+        echo ""
+        echo "No table or data seeding is needed for the default SELECT 1 smoke test."
+        echo "Next, mint a long-lived access key for the connector binding:"
+        echo "  task aws:setup:key"
+
+  aws:setup:key:
+    desc: |
+      Mint a long-lived access key for the read-only IAM user and print it
+      ONCE. Aileron's aws_sigv4 sealing requires a static long-lived key
+      (no SSO / STS temporary credentials per ADR-0019). Pass the
+      SecretAccessKey to `aileron binding setup` (vault-only); the
+      connector never holds it.
+
+      Cross-platform (aws CLI + Task shell only). Re-running mints another
+      key; IAM permits at most 2 per user, so remove old ones if needed
+      (`task aws:teardown` deletes them).
+
+      Configured by environment variables (optional, defaults shown):
+        ATHENA_INTEGRATION_IAM_USER=aileron-athena-readonly
+        ATHENA_INTEGRATION_REGION   (only used to print the binding hint)
+    vars:
+      IAM_USER: '{{.ATHENA_INTEGRATION_IAM_USER | default "aileron-athena-readonly"}}'
+      REGION: '{{.ATHENA_INTEGRATION_REGION | default "us-east-1"}}'
+    cmds:
+      - |
+        echo "Access key for {{.IAM_USER}} (shown once -- store the secret now):"
+        aws iam create-access-key --user-name "{{.IAM_USER}}" --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text --no-cli-pager
+      - |
+        echo ""
+        echo "Feed these to: aileron binding setup github://ALRubinger/aileron-connector-athena@<version>"
+        echo "  access_key_id -> the first value above (non-secret)"
+        echo "  secret        -> the second value above (vault-only)"
+        echo "  region        -> {{.REGION}}     service -> athena"
+
+  aws:teardown:
+    desc: |
+      Remove the read-only IAM identity this Taskfile created: delete all of
+      the user's access keys, then its inline policy, then the user. Leaves
+      the S3 results bucket by default; pass DELETE_BUCKET=true (with BUCKET)
+      to also empty and delete it.
+
+      Cross-platform (aws CLI + Task shell only). Safe to re-run.
+
+      Configured by environment variables (optional, defaults shown):
+        ATHENA_INTEGRATION_IAM_USER=aileron-athena-readonly
+        ATHENA_INTEGRATION_POLICY_NAME=AthenaReadOnly
+        ATHENA_INTEGRATION_DELETE_BUCKET=false  set to true to also empty
+                                                and delete the bucket
+        ATHENA_INTEGRATION_BUCKET               required only when
+                                                DELETE_BUCKET=true
+    vars:
+      IAM_USER: '{{.ATHENA_INTEGRATION_IAM_USER | default "aileron-athena-readonly"}}'
+      POLICY_NAME: '{{.ATHENA_INTEGRATION_POLICY_NAME | default "AthenaReadOnly"}}'
+      DELETE_BUCKET: '{{.ATHENA_INTEGRATION_DELETE_BUCKET | default "false"}}'
+      BUCKET: '{{.ATHENA_INTEGRATION_BUCKET | default ""}}'
+    cmds:
+      - |
+        echo "==> Deleting access keys for {{.IAM_USER}}"
+        for k in $(aws iam list-access-keys --user-name "{{.IAM_USER}}" --query 'AccessKeyMetadata[].AccessKeyId' --output text --no-cli-pager); do
+          echo "    delete access key $k"
+          aws iam delete-access-key --user-name "{{.IAM_USER}}" --access-key-id "$k"
+        done
+      - cmd: aws iam delete-user-policy --user-name "{{.IAM_USER}}" --policy-name "{{.POLICY_NAME}}"
+        ignore_error: true
+      - aws iam delete-user --user-name "{{.IAM_USER}}"
+      - |
+        if [ "{{.DELETE_BUCKET}}" = "true" ]; then
+          if [ -z "{{.BUCKET}}" ]; then
+            echo "==> ATHENA_INTEGRATION_DELETE_BUCKET=true but ATHENA_INTEGRATION_BUCKET is unset; skipping bucket deletion"
+          else
+            echo "==> Emptying and deleting bucket {{.BUCKET}}"
+            aws s3 rm "s3://{{.BUCKET}}" --recursive
+            aws s3api delete-bucket --bucket "{{.BUCKET}}"
+          fi
+        else
+          echo "==> Left the S3 bucket in place (set ATHENA_INTEGRATION_DELETE_BUCKET=true and ATHENA_INTEGRATION_BUCKET=<name> to remove it)"
+        fi
