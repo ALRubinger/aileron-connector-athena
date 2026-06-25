@@ -314,10 +314,10 @@ func getDataCatalog(args map[string]any) {
 func doSignedAthena(region, target string, body []byte) ([]byte, int, error) {
 	req, err := json.Marshal(map[string]any{
 		"method": "POST",
-		"url":    "https://athena." + region + ".amazonaws.com/",
+		"url":    buildAthenaURL(region),
 		"headers": map[string]string{
 			"Content-Type": "application/x-amz-json-1.1",
-			"X-Amz-Target": "AmazonAthena." + target,
+			"X-Amz-Target": buildAthenaTarget(target),
 		},
 		"body":       string(body),
 		"credential": "aws_sigv4",
