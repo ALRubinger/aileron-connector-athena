@@ -369,10 +369,126 @@ task test:integration:aws
 Runs a live, real-AWS Athena round trip (`StartQueryExecution`, poll
 `get_query_execution`, then `GetQueryResults`) against a throwaway,
 read-only AWS account. It is gated behind the `athena_integration` build
-tag and excluded from the default `task test` suite. It requires the
-`aws` CLI on PATH, an ambient AWS credential chain, and at minimum
-`ATHENA_INTEGRATION_REGION`. See `connector/integration_aws_test.go` for
-the full env contract.
+tag and excluded from the default `task test` suite. It signs requests with
+the `aws` CLI from your ambient credential chain, reusing the connector's
+own request builders. A passing run proves the connector's wire format is
+correct against live Athena and that the read-only IAM policy grants exactly
+enough for the full flow.
+
+This is the CLI-signed path. It does not exercise Aileron's host-side
+`aws_sigv4` sealing. The sealed path is the [Binding setup](#binding-setup)
+flow above. Use this test to validate the connector quickly without an
+Aileron runtime. This test's region is independent of the manifest pin. The
+pin described in
+[Region, work group, and output location](#region-work-group-and-output-location)
+governs the sealed install only.
+
+The rest of this section is a start-to-finish guide for a new account.
+
+#### What you do not need
+
+Athena is serverless. There is no cluster, database, or instance to stand
+up. Every account and region already has a default `primary` work group.
+The default query is `SELECT 1`, which scans no data, so no table, Glue
+catalog entry, or seed data is required.
+
+#### Prerequisites
+
+You need the `aws` CLI installed and logged in as an identity that can
+create S3 buckets and IAM users. `aws login` (IAM Identity Center) or
+`aws configure` (static keys) both work for this admin step. The read-only
+identity used by the test is created for you by the setup task below.
+
+#### Configure with environment variables
+
+The setup tasks and the integration test share one environment-variable
+namespace. Set the values once, then run the tasks with no arguments.
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `ATHENA_INTEGRATION_REGION` | yes | none | AWS region for the bucket, work group, and test |
+| `ATHENA_INTEGRATION_BUCKET` | yes | none | Globally unique S3 bucket name for query results |
+| `ATHENA_INTEGRATION_IAM_USER` | no | `aileron-athena-readonly` | Name of the read-only IAM user |
+| `ATHENA_INTEGRATION_WORKGROUP` | no | `primary` | Athena work group |
+| `ATHENA_INTEGRATION_RESULTS_PREFIX` | no | `athena-results` | S3 key prefix for results |
+| `ATHENA_INTEGRATION_POLICY_NAME` | no | `AthenaReadOnly` | Inline policy name on the user |
+| `ATHENA_INTEGRATION_DELETE_BUCKET` | no | `false` | `aws:teardown` only; `true` also deletes the bucket |
+
+The region, bucket, and work group must all agree. Pick any region your
+account allows. S3 bucket names are globally unique across all of AWS, so
+choose a name that is likely to be free.
+
+The `ATHENA_INTEGRATION_*` values are configuration, not secrets, so they
+are safe to keep in your shell profile.
+
+#### Provision the AWS prerequisites
+
+```sh
+export ATHENA_INTEGRATION_REGION=us-east-2            # any region your account allows
+export ATHENA_INTEGRATION_BUCKET=my-athena-results-1  # any globally unique name
+
+task aws:setup
+```
+
+`task aws:setup` is idempotent and safe to re-run. It creates the S3 results
+bucket with public access blocked, points the work group at
+`s3://<bucket>/<prefix>/`, creates the read-only IAM user, and attaches an
+inline policy scoped to Athena reads, Glue catalog reads, and the results
+bucket. IAM is global, so the same user is reused if you switch regions. The
+targets use only the `aws` CLI and Task's built-in shell, so they run the
+same on Windows, macOS, and Linux.
+
+#### Mint the read-only access key
+
+```sh
+task aws:setup:key
+```
+
+It prints the access key id and the secret access key once, tab separated.
+Store them now. Aileron's `aws_sigv4` sealing requires a static long-lived
+key, so this is also the key you bind in the [Binding setup](#binding-setup)
+flow.
+
+#### Run the round trip
+
+```sh
+export AWS_ACCESS_KEY_ID=<access key id from aws:setup:key>
+export AWS_SECRET_ACCESS_KEY=<secret access key from aws:setup:key>
+
+task test:integration:aws
+```
+
+A passing run looks like this:
+
+```
+--- PASS: TestIntegrationAthenaRoundTrip (2.22s)
+round-trip OK: query <id> SUCCEEDED, GetQueryResults returned 2 row(s)
+```
+
+Signing with the read-only key, rather than your admin identity, is what
+confirms the inline policy is sufficient. Keep the access key out of your
+shell startup files. Export it for the test session, or store it in a named
+`aws` profile, then unset it when you are done:
+
+```sh
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+```
+
+To run the test as your logged-in identity instead of the read-only key,
+skip the two `AWS_*` exports and run the test directly. Override the query
+with `ATHENA_INTEGRATION_QUERY`, which must pass the read-only SQL gate. See
+`connector/integration_aws_test.go` for the full env contract.
+
+#### Tear down
+
+```sh
+task aws:teardown
+```
+
+Deletes the read-only user's access keys, its inline policy, and the user.
+It leaves the bucket in place by default. To also empty and delete the
+bucket, set `ATHENA_INTEGRATION_DELETE_BUCKET=true` with
+`ATHENA_INTEGRATION_BUCKET` set to the bucket name.
 
 ### Packing
 
