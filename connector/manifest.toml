@@ -5,12 +5,22 @@
 # runtime enforces these at the WASM sandbox boundary and at the action
 # boundary (defense in depth per ADR-0003 / ADR-0005).
 
-# `version` is `0.0.0-dev` in source as a placeholder. CI substitutes
-# the real version (extracted from the pushed tag) into a build copy
-# before hashing/signing/packing. This is the same release-template
-# pattern as the action manifests' `sha256:bound-at-release` hash. The
-# committed source intentionally keeps the placeholder so the
-# publisher does not edit version fields by hand on every release.
+# `version` is `0.0.0-dev` in source as a placeholder. The release
+# pipeline substitutes the real version before hashing/signing/packing.
+# The concrete, verified mechanism: this repo's release.yml pins
+# ALRubinger/aileron-actions/actions/build-wasm-connector by commit SHA,
+# and that composite action's step "Substitute placeholder versions in
+# manifests" runs `sed -i s|0.0.0-dev|$VERSION|g` over this
+# connector/manifest.toml, where $VERSION is derived from the pushed
+# `vX.Y.Z` tag. That step hard-fails (exit 1) if any `0.0.0-dev`
+# placeholder survives the sed, so an unsubstituted version can never
+# ship. The downstream sign-and-publish step then hashes and signs the
+# already-substituted manifest. Substitution lives entirely in that
+# SHA-pinned upstream action; this repo's release.yml deliberately adds
+# no substitution of its own. The committed source intentionally keeps
+# the placeholder so the publisher does not edit version fields by hand
+# on every release. This mirrors the action manifests'
+# `sha256:bound-at-release` release-template pattern.
 [connector]
 name = "github://ALRubinger/aileron-connector-athena"
 version = "0.0.0-dev"
