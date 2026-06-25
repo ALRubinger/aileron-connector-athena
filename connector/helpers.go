@@ -139,6 +139,24 @@ func numericArg(args map[string]any, key string) (float64, bool) {
 	}
 }
 
+// buildAthenaURL assembles the regional Athena endpoint URL for a per-call
+// region arg: https://athena.<region>.amazonaws.com/. It is factored out of
+// doSignedAthena (which is wasip1-gated and so host-untestable) so the URL
+// shape gets host unit-test coverage. It does no validation — the region is
+// already confirmed present by resolveRegion and pin-enforced host-side.
+func buildAthenaURL(region string) string {
+	return "https://athena." + region + ".amazonaws.com/"
+}
+
+// buildAthenaTarget assembles the X-Amz-Target header value for an Athena
+// action by prefixing the AWS JSON 1.1 service namespace: given the bare
+// action "StartQueryExecution" it returns "AmazonAthena.StartQueryExecution".
+// Factored out of doSignedAthena for the same host-coverage reason as
+// buildAthenaURL.
+func buildAthenaTarget(action string) string {
+	return "AmazonAthena." + action
+}
+
 // buildStartQueryExecution constructs the AWS-JSON-1.1 body for Athena's
 // StartQueryExecution action.
 //

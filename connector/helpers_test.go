@@ -658,6 +658,42 @@ func TestBuildGetDataCatalog(t *testing.T) {
 	})
 }
 
+func TestBuildAthenaURL(t *testing.T) {
+	cases := []struct {
+		region string
+		want   string
+	}{
+		{"us-east-1", "https://athena.us-east-1.amazonaws.com/"},
+		{"eu-west-2", "https://athena.eu-west-2.amazonaws.com/"},
+		{"ap-southeast-1", "https://athena.ap-southeast-1.amazonaws.com/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.region, func(t *testing.T) {
+			if got := buildAthenaURL(tc.region); got != tc.want {
+				t.Fatalf("buildAthenaURL(%q) = %q, want %q", tc.region, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildAthenaTarget(t *testing.T) {
+	cases := []struct {
+		action string
+		want   string
+	}{
+		{"StartQueryExecution", "AmazonAthena.StartQueryExecution"},
+		{"GetQueryResults", "AmazonAthena.GetQueryResults"},
+		{"ListDataCatalogs", "AmazonAthena.ListDataCatalogs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			if got := buildAthenaTarget(tc.action); got != tc.want {
+				t.Fatalf("buildAthenaTarget(%q) = %q, want %q", tc.action, got, tc.want)
+			}
+		})
+	}
+}
+
 // mustBuild runs a builder and fails the test on error, returning the body.
 func mustBuild(t *testing.T, build func(map[string]any) ([]byte, error), args map[string]any) []byte {
 	t.Helper()
