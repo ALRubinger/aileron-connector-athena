@@ -1,0 +1,78 @@
+version: "3"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list-all
+    silent: true
+
+  build:
+    desc: Build the connector WASM binary
+    dir: connector
+    sources:
+      - main.go
+      - go.mod
+    generates:
+      - ../connector.wasm
+    env:
+      GOOS: wasip1
+      GOARCH: wasm
+    cmds:
+      - go build -trimpath -ldflags="-s -w" -o ../connector.wasm .
+
+  pack:
+    desc: Build and pack the connector tarball locally (mirrors the CI release workflow's first half — useful for offline smoke testing)
+    deps: [build]
+    cmds:
+      - rm -f connector-payload.bin connector-payload.sig
+      - cat connector.wasm connector/manifest.toml > connector-payload.bin
+      - |
+        if [ -z "$AILERON_SIGNING_KEY" ]; then
+          echo "AILERON_SIGNING_KEY env var not set; skipping signature (local dev)"
+          tar czf aileron.tar.gz connector.wasm connector/manifest.toml
+          exit 0
+        fi
+        printf '%s' "$AILERON_SIGNING_KEY" | base64 -d > /tmp/aileron-signing.key
+        openssl pkeyutl -sign -rawin -inkey /tmp/aileron-signing.key -in connector-payload.bin -out connector-payload.sig
+        rm -f /tmp/aileron-signing.key
+        tar czf aileron.tar.gz connector.wasm connector/manifest.toml connector-payload.sig
+
+  pack:hash:
+    desc: Print what the CI release workflow's connector content hash would be for the current build
+    deps: [build]
+    cmds:
+      - |
+        cat connector.wasm connector/manifest.toml > /tmp/aileron-pack-hash.bin
+        echo -n "sha256:"
+        shasum -a 256 /tmp/aileron-pack-hash.bin | awk '{print $1}'
+        rm -f /tmp/aileron-pack-hash.bin
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f connector.wasm connector-payload.bin connector-payload.sig aileron.tar.gz aileron-action-*.tar.gz aileron-action.tar.gz
+
+  test:
+    desc: Run connector unit tests + verify the wasip1 target still compiles
+    cmds:
+      - task: test:unit
+      - task: test:wasip1
+
+  test:unit:
+    desc: Run unit tests for the pure helpers (host platform; no WASM)
+    dir: connector
+    cmds:
+      # -coverprofile implies -cover and additionally writes the
+      # profile to disk for upload to Codecov by CI. Locally the file
+      # is harmless — it's gitignored via *.out.
+      - go test -v -count=1 -coverprofile=coverage.out ./...
+
+  test:wasip1:
+    desc: Smoke-check the connector compiles for the wasip1 target
+    dir: connector
+    env:
+      GOOS: wasip1
+      GOARCH: wasm
+    cmds:
+      - go build -o /dev/null .
