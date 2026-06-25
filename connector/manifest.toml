@@ -1,0 +1,77 @@
+# Aileron connector manifest for github://ALRubinger/aileron-connector-athena.
+#
+# Per ADR-0002 the manifest declares the connector's identity, what it
+# can talk to (network), and what credentials it needs to do so. The
+# runtime enforces these at the WASM sandbox boundary and at the action
+# boundary (defense in depth per ADR-0003 / ADR-0005).
+
+# `version` is `0.0.0-dev` in source as a placeholder. CI substitutes
+# the real version (extracted from the pushed tag) into a build copy
+# before hashing/signing/packing. This is the same release-template
+# pattern as the action manifests' `sha256:bound-at-release` hash. The
+# committed source intentionally keeps the placeholder so the
+# publisher does not edit version fields by hand on every release.
+[connector]
+name = "github://ALRubinger/aileron-connector-athena"
+version = "0.0.0-dev"
+publisher = "ALRubinger"
+
+# Network capability. This is the only host:port pair this connector is
+# allowed to dial. Anything else is denied at the sandbox boundary with
+# class capability_denied (ADR-0005 acceptance #3).
+#
+# Athena is a regional service. This host pins ONE region per install.
+# The region segment below is the per-install pin, not a fallback
+# default. Changing region means re-pinning this host and the
+# [capabilities.credential].region field below to the same value.
+# The runtime reads `region` from a required input arg and that arg
+# MUST equal the region pinned here and in [capabilities.credential].
+# A mismatch fails closed: a region the allow-list does not list is
+# capability_denied at the network boundary, and a region that
+# disagrees with the credential produces a SigV4 signature Athena
+# rejects.
+[capabilities.network]
+hosts = [
+  "athena.us-east-1.amazonaws.com:443",
+]
+
+# Credential capability. This is the kind of credential the runtime
+# resolves and injects on the connector's behalf. Per ADR-0005 the
+# connector never holds the credential bytes. The runtime signs the
+# outbound request host-side (Authorization / X-Amz-Date /
+# X-Amz-Content-Sha256) when an outbound request marks itself as
+# `credential: "aws_sigv4"`.
+#
+# `kind` MUST exactly equal the `credential = "aws_sigv4"` marker that
+# outbound http_request sets. A mismatch is rejected with
+# capability_denied.
+#
+# Unlike the OAuth sibling connectors, aws_sigv4 needs NO release-time
+# secret substitution. The OAuth connectors carry a
+# `client_secret = "bound-at-release"` placeholder that the release
+# workflow fills from a repository secret. This connector deliberately
+# does not use that pattern. The AWS secret access key is vault-only.
+# It is injected host-side at the network boundary and is never present
+# in source, in this manifest, or in the connector binary.
+#
+# `access_key_id` is a NON-secret identifier (the public half of the
+# key pair, safe to commit), distinct from the secret access key. It
+# is paired with the vault-held secret at signing time. The value
+# below is AWS's documentation example key ID; the publisher replaces
+# it with the install's real access key ID before release.
+#
+# `region`, `service`, and `access_key_id` are all required. Install
+# fails closed if any is absent. `region` MUST equal the region pinned
+# in the network host above. `service` MUST equal "athena".
+#
+# Static long-lived keys only. No session or temporary credentials
+# (no `X-Amz-Security-Token`), deferred per ADR-0019.
+#
+# Field values contain no CR or LF; host-side manifest validation
+# rejects either.
+[capabilities.credential]
+kind = "aws_sigv4"
+scope = "Run and inspect Athena queries, fetch query results, and browse Glue Data Catalog databases, tables, and columns; read-only"
+region = "us-east-1"
+service = "athena"
+access_key_id = "AKIAIOSFODNN7EXAMPLE"
