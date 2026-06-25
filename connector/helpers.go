@@ -494,7 +494,7 @@ var readOnlyLeadingKeywords = map[string]bool{
 //
 // The stacked-statement check is comment- and string-literal-aware: a ";"
 // inside a "--" line comment, a "/* */" block comment, or a single-quoted
-// string literal (with ” escaping) is not treated as a statement
+// string literal (with doubled-quote escaping) is not treated as a statement
 // terminator, so it does not false-reject an otherwise valid read query.
 // The IAM principal remains the backstop in every case.
 func validateReadOnlySQL(sql string) error {
@@ -571,7 +571,7 @@ func leadingKeyword(s string) (kw, rest string) {
 // checkSingleStatement enforces the single-statement rule. It performs a
 // comment- and string-literal-aware scan for the first statement-terminating
 // ";": it skips over "--" line comments (to newline/EOF), "/* */" block
-// comments, and single-quoted string literals (handling the doubled ” escape)
+// comments, and single-quoted string literals (handling the doubled-quote escape)
 // so that a ";" appearing inside a comment or string literal is never
 // mistaken for a statement terminator. Only a real, structural ";" counts;
 // the statement is rejected when such a ";" is followed by non-whitespace,
