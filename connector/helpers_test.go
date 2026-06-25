@@ -163,6 +163,105 @@ func TestBuildStartQueryExecution_EmptyOptionalsOmitted(t *testing.T) {
 	}
 }
 
+func TestValidateReadOnlySQL(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		wantErr bool
+	}{
+		// Allow-set keywords accepted.
+		{"select", "SELECT 1", false},
+		{"with", "WITH x AS (SELECT 1) SELECT * FROM x", false},
+		{"show", "SHOW TABLES", false},
+		{"describe", "DESCRIBE t", false},
+		{"desc", "DESC t", false},
+		{"explain", "EXPLAIN SELECT 1", false},
+		{"values", "VALUES (1)", false},
+
+		// Case-insensitivity.
+		{"lowercase select", "select 1", false},
+		{"mixed-case select", "SeLeCt 1", false},
+
+		// Representative reject keywords.
+		{"insert", "INSERT INTO t VALUES (1)", true},
+		{"update", "UPDATE t SET a = 1", true},
+		{"delete", "DELETE FROM t", true},
+		{"merge", "MERGE INTO t USING s ON t.id = s.id", true},
+		{"create", "CREATE TABLE t (a int)", true},
+		{"alter", "ALTER TABLE t ADD COLUMN b int", true},
+		{"drop", "DROP TABLE t", true},
+		{"msck", "MSCK REPAIR TABLE t", true},
+		{"call", "CALL system.something()", true},
+		{"unload", "UNLOAD (SELECT 1) TO 's3://b/'", true},
+		{"grant", "GRANT SELECT ON t TO u", true},
+		{"revoke", "REVOKE SELECT ON t FROM u", true},
+		{"truncate", "TRUNCATE TABLE t", true},
+
+		// Leading line comments.
+		{"line comment then select", "-- c\nSELECT 1", false},
+		{"line comment then delete", "-- c\nDELETE FROM t", true},
+
+		// Leading block comments.
+		{"block comment then select", "/* c */ SELECT 1", false},
+		{"multiple leading comments", "/*a*/ -- b\n SELECT 1", false},
+		{"block comment then delete", "/* c */ DELETE FROM t", true},
+
+		// Leading paren.
+		{"paren select", "(SELECT 1)", false},
+		{"paren comment select", "( /*c*/ SELECT 1 )", false},
+		{"paren delete", "(DELETE FROM t)", true},
+
+		// EXPLAIN ANALYZE rejected; plain EXPLAIN allowed.
+		{"explain analyze", "EXPLAIN ANALYZE SELECT 1", true},
+		{"explain analyze extra space", "EXPLAIN   ANALYZE SELECT 1", true},
+		{"explain analyze lowercase", "explain analyze select 1", true},
+		{"explain select", "EXPLAIN SELECT 1", false},
+
+		// Stacked statements rejected.
+		{"stacked drop", "SELECT 1; DROP TABLE t", true},
+		{"stacked select", "SELECT 1; SELECT 2", true},
+
+		// Single trailing semicolon accepted.
+		{"trailing semicolon", "SELECT 1;", false},
+		{"trailing semicolon space", "SELECT 1; ", false},
+		{"trailing semicolon comment", "SELECT 1; -- trailing comment", false},
+		{"trailing semicolon block comment", "SELECT 1; /* done */", false},
+
+		// Empty / whitespace-only / comment-only / paren-only rejected.
+		{"empty", "", true},
+		{"whitespace only", "   \n\t ", true},
+		{"line comment only", "-- just a comment", true},
+		{"block comment only", "/* just a comment */", true},
+		{"paren only", "(", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateReadOnlySQL(tc.sql)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("validateReadOnlySQL(%q) err = %v, wantErr = %v", tc.sql, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildStartQueryExecution_ReadOnlyGate(t *testing.T) {
+	t.Run("write statement rejected by gate", func(t *testing.T) {
+		if _, err := buildStartQueryExecution(map[string]any{"QueryString": "DELETE FROM t"}); err == nil {
+			t.Fatal("expected gate error for DELETE, got nil")
+		}
+	})
+	t.Run("select still builds a valid body", func(t *testing.T) {
+		b, err := buildStartQueryExecution(map[string]any{"QueryString": "SELECT 1"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		m := unmarshalBody(t, b)
+		if m["QueryString"] != "SELECT 1" {
+			t.Fatalf("QueryString = %v, want SELECT 1", m["QueryString"])
+		}
+	})
+}
+
 func TestBuildGetQueryExecution_RequiresId(t *testing.T) {
 	if _, err := buildGetQueryExecution(map[string]any{}); err == nil {
 		t.Fatal("expected error when QueryExecutionId missing, got nil")
