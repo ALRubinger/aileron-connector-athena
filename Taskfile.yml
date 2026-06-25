@@ -76,3 +76,20 @@ tasks:
       GOARCH: wasm
     cmds:
       - go build -o /dev/null .
+
+  test:integration:aws:
+    desc: |
+      Run the LIVE, real-AWS Athena round-trip test (StartQueryExecution ->
+      poll get_query_execution -> GetQueryResults) against a throwaway,
+      read-only AWS account. Excluded from the default `task test` suite: it
+      is gated behind the `athena_integration` build tag and is run only by
+      this target. Read-only by construction (a single SELECT plus reads).
+
+      Requires the `aws` CLI on PATH, an ambient AWS credential chain the CLI
+      can sign with, and at minimum ATHENA_INTEGRATION_REGION (no default —
+      absence FAILS the test). Optional: ATHENA_INTEGRATION_WORKGROUP,
+      ATHENA_INTEGRATION_OUTPUT, ATHENA_INTEGRATION_QUERY. See
+      connector/integration_aws_test.go for the full env contract.
+    dir: connector
+    cmds:
+      - go test -tags athena_integration -count=1 -v -run TestIntegrationAthenaRoundTrip ./...
