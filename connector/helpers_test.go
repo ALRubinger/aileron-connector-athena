@@ -217,6 +217,24 @@ func TestValidateReadOnlySQL(t *testing.T) {
 		{"explain analyze lowercase", "explain analyze select 1", true},
 		{"explain select", "EXPLAIN SELECT 1", false},
 
+		// EXPLAIN ANALYZE with intervening comments still rejected; the
+		// next-token check strips comments before comparing to ANALYZE.
+		{"explain block-comment analyze", "EXPLAIN/*c*/ANALYZE SELECT 1", true},
+		{"explain line-comment analyze", "EXPLAIN  --x\n ANALYZE SELECT 1", true},
+		// Parenthesized EXPLAIN option form is not EXPLAIN ANALYZE: the
+		// leading "(" makes the next token empty, so it is accepted.
+		{"explain option form", "EXPLAIN (TYPE DISTRIBUTED) SELECT 1", false},
+
+		// Single leading "(" tolerance is intentional; a second nested "("
+		// is not stripped, so the keyword is not found and it is rejected.
+		{"multi leading paren rejected (intentional)", "((SELECT 1))", true},
+
+		// A ";" inside a comment or string literal is not a statement
+		// terminator and must not false-reject a valid read query.
+		{"semicolon in line comment", "SELECT 1 -- has ; in comment", false},
+		{"semicolon in block comment", "/* a;b */ SELECT 1", false},
+		{"semicolon in string literal", "SELECT 1 WHERE col = 'a;b'", false},
+
 		// Stacked statements rejected.
 		{"stacked drop", "SELECT 1; DROP TABLE t", true},
 		{"stacked select", "SELECT 1; SELECT 2", true},
