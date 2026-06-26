@@ -712,6 +712,230 @@ func TestBuildAthenaTarget(t *testing.T) {
 	}
 }
 
+// --- run_query pure helpers --------------------------------------------
+
+func TestResolveTimeoutSeconds(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want int
+	}{
+		{"absent uses default", map[string]any{}, defaultRunQueryTimeoutSeconds},
+		{"float override", map[string]any{"TimeoutSeconds": float64(30)}, 30},
+		{"int override", map[string]any{"TimeoutSeconds": 45}, 45},
+		{"json.Number override", map[string]any{"TimeoutSeconds": json.Number("60")}, 60},
+		{"zero falls back to default", map[string]any{"TimeoutSeconds": float64(0)}, defaultRunQueryTimeoutSeconds},
+		{"negative falls back to default", map[string]any{"TimeoutSeconds": float64(-5)}, defaultRunQueryTimeoutSeconds},
+		{"non-numeric falls back to default", map[string]any{"TimeoutSeconds": "soon"}, defaultRunQueryTimeoutSeconds},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveTimeoutSeconds(tc.args); got != tc.want {
+				t.Fatalf("resolveTimeoutSeconds(%v) = %d, want %d", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClassifyQueryState(t *testing.T) {
+	cases := []struct {
+		state string
+		want  queryStateClass
+	}{
+		{"SUCCEEDED", queryStateSucceeded},
+		{"FAILED", queryStateFailed},
+		{"CANCELLED", queryStateCancelled},
+		{"QUEUED", queryStateRunning},
+		{"RUNNING", queryStateRunning},
+		{"", queryStateRunning},
+		{"BOGUS", queryStateUnknown},
+		{"succeeded", queryStateUnknown}, // case-sensitive: Athena emits upper-case
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			if got := classifyQueryState(tc.state); got != tc.want {
+				t.Fatalf("classifyQueryState(%q) = %v, want %v", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQueryExecutionStatus(t *testing.T) {
+	t.Run("full status", func(t *testing.T) {
+		resp := map[string]any{
+			"QueryExecution": map[string]any{
+				"Status": map[string]any{
+					"State":             "FAILED",
+					"StateChangeReason": "boom",
+				},
+			},
+		}
+		state, reason := queryExecutionStatus(resp)
+		if state != "FAILED" || reason != "boom" {
+			t.Fatalf("got (%q,%q), want (FAILED,boom)", state, reason)
+		}
+	})
+	t.Run("missing members yield empties", func(t *testing.T) {
+		state, reason := queryExecutionStatus(map[string]any{})
+		if state != "" || reason != "" {
+			t.Fatalf("got (%q,%q), want empties", state, reason)
+		}
+	})
+	t.Run("succeeded has no reason", func(t *testing.T) {
+		resp := map[string]any{
+			"QueryExecution": map[string]any{"Status": map[string]any{"State": "SUCCEEDED"}},
+		}
+		state, reason := queryExecutionStatus(resp)
+		if state != "SUCCEEDED" || reason != "" {
+			t.Fatalf("got (%q,%q), want (SUCCEEDED,\"\")", state, reason)
+		}
+	})
+}
+
+func TestResultPage(t *testing.T) {
+	t.Run("result set and next token", func(t *testing.T) {
+		resp := map[string]any{
+			"ResultSet": map[string]any{"Rows": []any{}},
+			"NextToken": "tok",
+		}
+		rs, tok := resultPage(resp)
+		if rs == nil || tok != "tok" {
+			t.Fatalf("got (%v,%q), want (non-nil, tok)", rs, tok)
+		}
+	})
+	t.Run("last page has no next token", func(t *testing.T) {
+		resp := map[string]any{"ResultSet": map[string]any{"Rows": []any{}}}
+		rs, tok := resultPage(resp)
+		if rs == nil || tok != "" {
+			t.Fatalf("got (%v,%q), want (non-nil, \"\")", rs, tok)
+		}
+	})
+	t.Run("missing result set", func(t *testing.T) {
+		rs, tok := resultPage(map[string]any{})
+		if rs != nil || tok != "" {
+			t.Fatalf("got (%v,%q), want (nil, \"\")", rs, tok)
+		}
+	})
+}
+
+func TestMergeResultPages(t *testing.T) {
+	// Build a row carrying a single VarCharValue, the Athena Row shape.
+	row := func(v string) any {
+		return map[string]any{"Data": []any{map[string]any{"VarCharValue": v}}}
+	}
+
+	t.Run("single page keeps header and metadata", func(t *testing.T) {
+		page1 := map[string]any{
+			"Rows":              []any{row("col"), row("a"), row("b")},
+			"ResultSetMetadata": map[string]any{"ColumnInfo": []any{map[string]any{"Name": "col"}}},
+		}
+		merged := mergeResultPages([]map[string]any{page1})
+		rows, _ := merged["Rows"].([]any)
+		if len(rows) != 3 {
+			t.Fatalf("rows = %d, want 3", len(rows))
+		}
+		if _, ok := merged["ResultSetMetadata"]; !ok {
+			t.Fatal("ResultSetMetadata should be carried from page 1")
+		}
+	})
+
+	t.Run("multi page concatenates without repeating header", func(t *testing.T) {
+		// Athena emits the header only on page 1; later pages carry data
+		// rows only. Plain concatenation must yield [header, data...] once.
+		page1 := map[string]any{
+			"Rows":              []any{row("col"), row("a")},
+			"ResultSetMetadata": map[string]any{"ColumnInfo": []any{map[string]any{"Name": "col"}}},
+		}
+		page2 := map[string]any{"Rows": []any{row("b"), row("c")}}
+		page3 := map[string]any{"Rows": []any{row("d")}}
+		merged := mergeResultPages([]map[string]any{page1, page2, page3})
+		rows, _ := merged["Rows"].([]any)
+		if len(rows) != 5 {
+			t.Fatalf("rows = %d, want 5 (header + 4 data)", len(rows))
+		}
+		// First row is the header from page 1.
+		first, _ := rows[0].(map[string]any)
+		data, _ := first["Data"].([]any)
+		cell, _ := data[0].(map[string]any)
+		if cell["VarCharValue"] != "col" {
+			t.Fatalf("first row = %v, want the header row", rows[0])
+		}
+		// Metadata kept once from page 1.
+		if _, ok := merged["ResultSetMetadata"]; !ok {
+			t.Fatal("ResultSetMetadata should be kept from page 1")
+		}
+	})
+
+	t.Run("metadata taken from first page that carries it", func(t *testing.T) {
+		page1 := map[string]any{"Rows": []any{row("a")}}
+		page2 := map[string]any{
+			"Rows":              []any{row("b")},
+			"ResultSetMetadata": map[string]any{"ColumnInfo": []any{map[string]any{"Name": "x"}}},
+		}
+		merged := mergeResultPages([]map[string]any{page1, page2})
+		if _, ok := merged["ResultSetMetadata"]; !ok {
+			t.Fatal("ResultSetMetadata should be picked up from a later page when page 1 lacks it")
+		}
+	})
+
+	t.Run("empty pages yield empty rows array", func(t *testing.T) {
+		merged := mergeResultPages(nil)
+		rows, ok := merged["Rows"].([]any)
+		if !ok || len(rows) != 0 {
+			t.Fatalf("Rows = %v, want empty array", merged["Rows"])
+		}
+		if _, ok := merged["ResultSetMetadata"]; ok {
+			t.Fatal("no metadata expected when there are no pages")
+		}
+	})
+
+	t.Run("nil page entries skipped", func(t *testing.T) {
+		page := map[string]any{"Rows": []any{row("a")}}
+		merged := mergeResultPages([]map[string]any{nil, page, nil})
+		rows, _ := merged["Rows"].([]any)
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rows))
+		}
+	})
+
+	t.Run("page missing Rows contributes nothing", func(t *testing.T) {
+		page1 := map[string]any{"Rows": []any{row("a")}}
+		page2 := map[string]any{"ResultSetMetadata": map[string]any{}} // no Rows
+		merged := mergeResultPages([]map[string]any{page1, page2})
+		rows, _ := merged["Rows"].([]any)
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rows))
+		}
+	})
+
+	t.Run("merged ResultSet round-trips as JSON", func(t *testing.T) {
+		page1 := map[string]any{"Rows": []any{row("a")}}
+		merged := mergeResultPages([]map[string]any{page1})
+		if _, err := json.Marshal(merged); err != nil {
+			t.Fatalf("merged ResultSet not JSON-serializable: %v", err)
+		}
+	})
+}
+
+// TestRunQueryReadOnlyGate proves the run_query path rejects writes through
+// the SAME read-only gate the async start path uses: run_query builds its
+// StartQueryExecution body with buildStartQueryExecution, so a non-read
+// QueryString fails before any host call.
+func TestRunQueryReadOnlyGate(t *testing.T) {
+	t.Run("write statement rejected", func(t *testing.T) {
+		for _, q := range []string{"DELETE FROM t", "INSERT INTO t VALUES (1)", "DROP TABLE t", "SELECT 1; DROP TABLE t"} {
+			if _, err := buildStartQueryExecution(map[string]any{"QueryString": q}); err == nil {
+				t.Fatalf("expected gate error for %q, got nil", q)
+			}
+		}
+	})
+	t.Run("read statement passes", func(t *testing.T) {
+		if _, err := buildStartQueryExecution(map[string]any{"QueryString": "SELECT 1"}); err != nil {
+			t.Fatalf("unexpected gate error for SELECT: %v", err)
+		}
+	})
+}
+
 // mustBuild runs a builder and fails the test on error, returning the body.
 func mustBuild(t *testing.T, build func(map[string]any) ([]byte, error), args map[string]any) []byte {
 	t.Helper()

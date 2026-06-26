@@ -5,6 +5,7 @@ actions = [
   "actions/start-query-execution",
   "actions/get-query-execution",
   "actions/get-query-results",
+  "actions/run-query",
   "actions/stop-query-execution",
   "actions/list-query-executions",
   "actions/batch-get-query-execution",

@@ -184,16 +184,20 @@ statement above scopes.
 
 ## Operations
 
-Fourteen ops. Thirteen read. One (`stop_query_execution`) is an
-approval-gated write. Every op is a `POST` to the regional Athena host
-with `Content-Type: application/x-amz-json-1.1` and an
-`X-Amz-Target: AmazonAthena.<Action>` header selecting the operation.
+Fifteen ops. Fourteen read. One (`stop_query_execution`) is an
+approval-gated write. Fourteen are a single `POST` to the regional Athena
+host with `Content-Type: application/x-amz-json-1.1` and an
+`X-Amz-Target: AmazonAthena.<Action>` header selecting the operation. The
+fifteenth, `run_query`, is a synchronous orchestration of three of those
+calls in one op (see [Synchronous run_query for deterministic
+runtimes](#synchronous-run_query-for-deterministic-runtimes)).
 
 | Op | `X-Amz-Target` | Effect | Idempotency |
 |---|---|---|---|
 | `start_query_execution` | `AmazonAthena.StartQueryExecution` | read | not idempotent |
 | `get_query_execution` | `AmazonAthena.GetQueryExecution` | read | idempotent |
 | `get_query_results` | `AmazonAthena.GetQueryResults` | read | idempotent |
+| `run_query` | `StartQueryExecution` → `GetQueryExecution` → `GetQueryResults` | read | not idempotent |
 | `stop_query_execution` | `AmazonAthena.StopQueryExecution` | write (gated) | idempotent |
 | `list_query_executions` | `AmazonAthena.ListQueryExecutions` | read | idempotent |
 | `batch_get_query_execution` | `AmazonAthena.BatchGetQueryExecution` | read | idempotent |
@@ -211,7 +215,8 @@ submits a fresh execution and returns a new `QueryExecutionId`. The
 read ops are idempotent because re-issuing them returns the same view
 without side effects. `stop_query_execution` is `idempotent = true`
 because stopping an already-stopped execution is a no-op against the
-same id.
+same id. `run_query` declares `idempotent = false` for the same reason as
+`start_query_execution`: it submits a fresh execution each call.
 
 ## Async start, poll, results flow
 
@@ -230,6 +235,34 @@ read results.
    `QueryExecutionId`, with `MaxResults` and `NextToken` paging.
 4. `stop_query_execution` cancels a query that is still `QUEUED` or
    `RUNNING`. This is the one approval-gated step.
+
+## Synchronous run_query for deterministic runtimes
+
+The start/poll/results flow above suits an LLM-in-the-loop caller that can
+poll between calls. A deterministic Aileron Flight Plan cannot: its step
+graph has no loop, conditional, or wait construct, and `get_query_results`
+fails until the query has reached `SUCCEEDED`. `run_query` exists for that
+caller. It internalizes the whole lifecycle in one synchronous op:
+
+1. `StartQueryExecution` with the given SQL, after the same read-only gate
+   (`validateReadOnlySQL`) the async path applies — a non-read query fails
+   in-connector before any AWS call.
+2. Poll `GetQueryExecution` every two seconds until the execution reaches
+   a terminal state, bounded by an overall budget (`TimeoutSeconds`,
+   default 180). A still-`QUEUED`/`RUNNING` query at the deadline fails
+   with `connector_runtime_error`; a `FAILED`/`CANCELLED` execution fails
+   with `external_api_error` carrying Athena's `StateChangeReason`.
+3. On `SUCCEEDED`, page `GetQueryResults` to completion, concatenating the
+   rows (the column header appears once, on the first page) and keeping
+   `ResultSetMetadata` once.
+
+The response is `{QueryExecutionId, ResultSet}`. `run_query` takes the
+same `region` / `QueryString` / `QueryExecutionContext` /
+`ResultConfiguration` / `WorkGroup` / `ClientRequestToken` inputs as
+`start_query_execution`, plus the optional `TimeoutSeconds`. It is
+additive: the three async ops stay as-is for the agentic flow. It adds no
+new network host or credential — every internal call goes through the same
+signed Athena boundary with the same `aws_sigv4` credential.
 
 ## Binding setup
 
@@ -319,6 +352,7 @@ aileron-connector-athena/
 │   ├── start-query-execution/action.md
 │   ├── get-query-execution/action.md
 │   ├── get-query-results/action.md
+│   ├── run-query/action.md              # synchronous start->poll->results
 │   ├── stop-query-execution/action.md   # the one approval-gated write
 │   ├── list-query-executions/action.md
 │   ├── batch-get-query-execution/action.md
