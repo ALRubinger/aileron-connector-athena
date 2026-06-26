@@ -462,6 +462,120 @@ func buildGetDataCatalog(args map[string]any) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// defaultRunQueryTimeoutSeconds is the overall poll budget run_query uses
+// when the caller supplies no TimeoutSeconds. It mirrors the live
+// integration test's 3-minute ceiling (integration_aws_test.go): a trivial
+// SELECT settles in seconds, and this guards against a hung or long-queued
+// execution rather than waiting forever.
+const defaultRunQueryTimeoutSeconds = 180
+
+// resolveTimeoutSeconds reads the optional TimeoutSeconds arg for run_query.
+// A present, numeric, positive value is used as-is; an absent, non-numeric,
+// or non-positive value falls back to defaultRunQueryTimeoutSeconds. Factored
+// out of the wasip1-gated poll loop so the default/override policy is host
+// unit-testable.
+func resolveTimeoutSeconds(args map[string]any) int {
+	if v, ok := numericArg(args, "TimeoutSeconds"); ok && v > 0 {
+		return int(v)
+	}
+	return defaultRunQueryTimeoutSeconds
+}
+
+// queryStateClass classifies an Athena Status.State string for the run_query
+// poll loop.
+type queryStateClass int
+
+const (
+	// queryStateRunning covers the non-terminal states QUEUED, RUNNING, and
+	// the empty string (a status not yet populated): keep polling.
+	queryStateRunning queryStateClass = iota
+	// queryStateSucceeded is the terminal success state.
+	queryStateSucceeded
+	// queryStateFailed is the terminal FAILED state.
+	queryStateFailed
+	// queryStateCancelled is the terminal CANCELLED state.
+	queryStateCancelled
+	// queryStateUnknown is any unrecognized state value: the loop fails fast
+	// rather than polling forever on a state it cannot reason about.
+	queryStateUnknown
+)
+
+// classifyQueryState maps an Athena Status.State string to a queryStateClass.
+// SUCCEEDED/FAILED/CANCELLED are terminal; QUEUED, RUNNING, and "" are
+// non-terminal (keep polling); anything else is queryStateUnknown. This
+// mirrors the terminal-state switch in integration_aws_test.go's
+// pollUntilTerminal and is factored here so the classification is host
+// unit-testable, leaving only the sleep+host-call loop in the wasip1-gated
+// main.go.
+func classifyQueryState(state string) queryStateClass {
+	switch state {
+	case "SUCCEEDED":
+		return queryStateSucceeded
+	case "FAILED":
+		return queryStateFailed
+	case "CANCELLED":
+		return queryStateCancelled
+	case "QUEUED", "RUNNING", "":
+		return queryStateRunning
+	default:
+		return queryStateUnknown
+	}
+}
+
+// queryExecutionStatus extracts (State, StateChangeReason) from a parsed
+// GetQueryExecution response, reading QueryExecution.Status.State and
+// QueryExecution.Status.StateChangeReason. Missing members yield empty
+// strings (an empty State classifies as still-running). Pure and host
+// unit-testable.
+func queryExecutionStatus(resp map[string]any) (state, reason string) {
+	exec, _ := resp["QueryExecution"].(map[string]any)
+	status, _ := exec["Status"].(map[string]any)
+	state, _ = status["State"].(string)
+	reason, _ = status["StateChangeReason"].(string)
+	return state, reason
+}
+
+// resultPage extracts the ResultSet object and the top-level NextToken from a
+// parsed GetQueryResults response. In Athena's GetQueryResults response the
+// NextToken sits at the top level (a sibling of ResultSet, not inside it), so
+// the run_query pager reads it from there. A missing ResultSet yields nil; a
+// missing/empty NextToken yields "" (the last page). Pure and host
+// unit-testable.
+func resultPage(resp map[string]any) (resultSet map[string]any, nextToken string) {
+	resultSet, _ = resp["ResultSet"].(map[string]any)
+	nextToken, _ = resp["NextToken"].(string)
+	return resultSet, nextToken
+}
+
+// mergeResultPages concatenates a sequence of GetQueryResults ResultSet pages
+// (in fetch order) into a single ResultSet for the run_query response. Athena
+// emits the column header as the first Row of the FIRST page only and does
+// not repeat it on later pages, so an in-order concatenation of every page's
+// Rows yields [header, data...] exactly once. The ResultSetMetadata is taken
+// from the first page that carries one and kept once (later pages repeat or
+// omit it). nil page entries are skipped. The merged ResultSet always carries
+// a Rows array (possibly empty). Pure and host unit-testable; only the
+// host-call paging loop lives in the wasip1-gated main.go.
+func mergeResultPages(pages []map[string]any) map[string]any {
+	merged := map[string]any{}
+	rows := []any{}
+	for _, rs := range pages {
+		if rs == nil {
+			continue
+		}
+		if _, have := merged["ResultSetMetadata"]; !have {
+			if md, ok := rs["ResultSetMetadata"]; ok {
+				merged["ResultSetMetadata"] = md
+			}
+		}
+		if pr, ok := rs["Rows"].([]any); ok {
+			rows = append(rows, pr...)
+		}
+	}
+	merged["Rows"] = rows
+	return merged
+}
+
 // readOnlyLeadingKeywords is the allow-set of first keywords a read-only
 // Athena statement may begin with. Membership is the accept test;
 // everything else (INSERT/UPDATE/DELETE/MERGE/CREATE/ALTER/DROP/MSCK/

@@ -43,6 +43,18 @@
 // get_work_group, list_data_catalogs, and get_data_catalog. Each routes
 // through doSignedAthena with its X-Amz-Target and a region arg.
 //
+// It also exposes one synchronous orchestration op, run_query, for
+// deterministic (no-LLM) callers such as Aileron Flight Plans whose step
+// graph has no loop/poll construct. run_query internalizes the full
+// start->poll->page lifecycle in a single call: it starts the query (via
+// the same buildStartQueryExecution read-only gate), polls GetQueryExecution
+// to a terminal state bounded by an overall deadline, then pages
+// GetQueryResults to completion, emitting {QueryExecutionId, ResultSet}. It
+// adds no new network host or credential: every internal call still goes
+// through doSignedAthena to the same regional Athena host with the same
+// aws_sigv4 credential. The three async ops above stay as-is for the
+// LLM-in-the-loop flow.
+//
 // Every op requires a `region` arg. There is no default region: a missing
 // `region` is a connector_runtime_error raised before any host call. The
 // region selects the AWS endpoint and, via the outbound host, the binding
@@ -59,6 +71,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 	"unsafe"
 )
 
@@ -155,6 +168,8 @@ func main() {
 		listDataCatalogs(in.Args)
 	case "get_data_catalog":
 		getDataCatalog(in.Args)
+	case "run_query":
+		runQuery(in.Args)
 	default:
 		writeError("connector_runtime_error", "unknown op: "+in.Op)
 		os.Exit(1)
@@ -294,6 +309,162 @@ func listDataCatalogs(args map[string]any) {
 // action. It returns the configuration of one data catalog.
 func getDataCatalog(args map[string]any) {
 	dispatch("get_data_catalog", "GetDataCatalog", args, buildGetDataCatalog)
+}
+
+// runQueryPollInterval is the wait between GetQueryExecution polls in
+// run_query's wait loop. It mirrors the live integration test's 2s ticker
+// (integration_aws_test.go): frequent enough that a fast SELECT returns
+// promptly, slow enough not to hammer the Athena API while a query runs.
+const runQueryPollInterval = 2 * time.Second
+
+// runQuery maps op run_query → the full synchronous Athena lifecycle in a
+// single call, for deterministic (no-LLM) callers whose runtime cannot poll
+// between steps. Unlike the other ops it is NOT a single doSignedAthena
+// round-trip through `dispatch`; it is a bespoke orchestration:
+//
+//  1. resolveRegion (required, no default — connector_runtime_error if absent).
+//  2. buildStartQueryExecution — the SAME builder the async
+//     start_query_execution op uses, so the read-only SQL gate
+//     (validateReadOnlySQL) rejects writes/DDL before any host call.
+//  3. StartQueryExecution via doSignedAthena; parse the QueryExecutionId.
+//  4. Poll GetQueryExecution every runQueryPollInterval, classifying
+//     Status.State, until a terminal state or the overall deadline
+//     (TimeoutSeconds, default defaultRunQueryTimeoutSeconds). FAILED/CANCELLED
+//     → external_api_error carrying the StateChangeReason; deadline →
+//     connector_runtime_error.
+//  5. On SUCCEEDED, page GetQueryResults following the response NextToken,
+//     concatenating ResultSet.Rows (the column header appears only on page 1)
+//     and keeping ResultSetMetadata once, then emit {QueryExecutionId,
+//     ResultSet}.
+//
+// Every internal call goes through doSignedAthena to the same regional host
+// with the same aws_sigv4 credential: run_query needs no new network host or
+// credential. The pure pieces (state classifier, status/result extraction,
+// page merge, timeout policy) live in helpers.go and are unit-tested; only
+// this sleep+host-call loop is wasip1-gated and host-untestable, consistent
+// with the other op funcs.
+func runQuery(args map[string]any) {
+	region, err := resolveRegion(args)
+	if err != nil {
+		writeError("connector_runtime_error", "run_query: "+err.Error())
+		return
+	}
+
+	// Build + start. buildStartQueryExecution applies the read-only gate
+	// before any host call, so a non-read QueryString fails here.
+	startBody, err := buildStartQueryExecution(args)
+	if err != nil {
+		writeError("connector_runtime_error", "run_query: "+err.Error())
+		return
+	}
+	startResp, status, err := doSignedAthena(region, "StartQueryExecution", startBody)
+	if err != nil {
+		writeError("connector_runtime_error", "run_query: "+err.Error())
+		return
+	}
+	if status < 200 || status >= 300 {
+		writeError("external_api_error", fmt.Sprintf("run_query: StartQueryExecution returned %d: %s", status, string(startResp)))
+		return
+	}
+	var started map[string]any
+	if err := json.Unmarshal(startResp, &started); err != nil {
+		writeError("connector_runtime_error", "run_query: parse StartQueryExecution: "+err.Error())
+		return
+	}
+	queryID, _ := started["QueryExecutionId"].(string)
+	if queryID == "" {
+		writeError("external_api_error", "run_query: StartQueryExecution returned no QueryExecutionId")
+		return
+	}
+
+	// Poll to a terminal state, bounded by the overall deadline.
+	getExecBody, err := buildGetQueryExecution(map[string]any{"QueryExecutionId": queryID})
+	if err != nil {
+		writeError("connector_runtime_error", "run_query: "+err.Error())
+		return
+	}
+	timeoutSeconds := resolveTimeoutSeconds(args)
+	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	for {
+		execResp, status, err := doSignedAthena(region, "GetQueryExecution", getExecBody)
+		if err != nil {
+			writeError("connector_runtime_error", "run_query: "+err.Error())
+			return
+		}
+		if status < 200 || status >= 300 {
+			writeError("external_api_error", fmt.Sprintf("run_query: GetQueryExecution returned %d: %s", status, string(execResp)))
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(execResp, &parsed); err != nil {
+			writeError("connector_runtime_error", "run_query: parse GetQueryExecution: "+err.Error())
+			return
+		}
+		state, reason := queryExecutionStatus(parsed)
+		switch classifyQueryState(state) {
+		case queryStateSucceeded:
+			runQueryFetchResults(region, queryID)
+			return
+		case queryStateFailed, queryStateCancelled:
+			writeError("external_api_error", fmt.Sprintf("run_query: query %s reached terminal state %s: %s", queryID, state, reason))
+			return
+		case queryStateUnknown:
+			writeError("external_api_error", fmt.Sprintf("run_query: query %s returned unexpected state %q", queryID, state))
+			return
+		}
+		// Still running. Stop if the budget is spent; otherwise wait.
+		if time.Now().After(deadline) {
+			writeError("connector_runtime_error", fmt.Sprintf("run_query: timed out after %ds waiting for query %s to reach a terminal state (last state %q)", timeoutSeconds, queryID, state))
+			return
+		}
+		time.Sleep(runQueryPollInterval)
+	}
+}
+
+// runQueryFetchResults pages GetQueryResults for a SUCCEEDED execution and
+// writes the run_query output. It follows the response NextToken to the last
+// page, merges the pages with mergeResultPages (header row from page 1 only,
+// ResultSetMetadata kept once), and emits {QueryExecutionId, ResultSet}. Any
+// host/transport failure is a connector_runtime_error; a non-2xx Athena reply
+// is an external_api_error — matching the rest of run_query's error mapping.
+func runQueryFetchResults(region, queryID string) {
+	var pages []map[string]any
+	nextToken := ""
+	for {
+		resultArgs := map[string]any{"QueryExecutionId": queryID}
+		if nextToken != "" {
+			resultArgs["NextToken"] = nextToken
+		}
+		body, err := buildGetQueryResults(resultArgs)
+		if err != nil {
+			writeError("connector_runtime_error", "run_query: "+err.Error())
+			return
+		}
+		resp, status, err := doSignedAthena(region, "GetQueryResults", body)
+		if err != nil {
+			writeError("connector_runtime_error", "run_query: "+err.Error())
+			return
+		}
+		if status < 200 || status >= 300 {
+			writeError("external_api_error", fmt.Sprintf("run_query: GetQueryResults returned %d: %s", status, string(resp)))
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(resp, &parsed); err != nil {
+			writeError("connector_runtime_error", "run_query: parse GetQueryResults: "+err.Error())
+			return
+		}
+		rs, tok := resultPage(parsed)
+		pages = append(pages, rs)
+		if tok == "" {
+			break
+		}
+		nextToken = tok
+	}
+	writeOutput(map[string]any{
+		"QueryExecutionId": queryID,
+		"ResultSet":        mergeResultPages(pages),
+	})
 }
 
 // doSignedAthena is the single shared signed caller for every Athena
