@@ -45,12 +45,13 @@
 //
 // Every op requires a `region` arg. There is no default region: a missing
 // `region` is a connector_runtime_error raised before any host call. The
-// region MUST equal the region pinned in manifest.toml's
-// [capabilities.network] host and [capabilities.credential].region — the
-// connector only validates the arg is present; the host enforces the pin
+// region selects the AWS endpoint and, via the outbound host, the binding
+// the host signs with. This connector is multi-region: any region whose
+// athena.<region>.amazonaws.com host is in manifest.toml's
+// [capabilities.network] allow-list is valid. The connector only
+// validates the arg is present; the host enforces the allow-list
 // fail-closed (a region the allow-list does not list is capability_denied
-// at the network boundary, and a region that disagrees with the
-// credential produces a SigV4 signature Athena rejects).
+// at the network boundary) and signs with the region-matched binding.
 package main
 
 import (

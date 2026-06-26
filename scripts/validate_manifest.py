@@ -12,8 +12,10 @@ the change can never regress unnoticed. Asserted invariants:
 
   * [capabilities.credential].kind    == "aws_sigv4"
   * [capabilities.credential].service == "athena"
-  * every [capabilities.network].hosts entry is athena.<region>.amazonaws.com:443
-    and its <region> segment equals [capabilities.credential].region
+  * [capabilities.credential] has NO region and NO access_key_id keys
+    (region and access_key_id come from the binding now, not the manifest)
+  * [capabilities.network].hosts is non-empty and every entry is
+    athena.<region>.amazonaws.com:443 with a plausible region token
   * no OAuth-style keys anywhere (client_secret / scopes / oauth*)
   * no embedded CR or LF inside any string field
 """
@@ -21,6 +23,7 @@ the change can never regress unnoticed. Asserted invariants:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 
@@ -30,6 +33,14 @@ MANIFEST_PATH = os.path.join(REPO_ROOT, "connector", "manifest.toml")
 # Substring-matched OAuth-style key names that must never appear in this
 # aws_sigv4 connector's manifest (case-insensitive).
 OAUTH_KEY_MARKERS = ("client_secret", "scopes", "oauth")
+
+# A plausible AWS region token: lowercase geo prefix, one or more middle
+# segments, and a trailing number (e.g. us-east-1, ap-southeast-4).
+REGION_RE = re.compile(r"^[a-z]{2,}-[a-z]+(?:-[a-z]+)*-\d+$")
+
+# Credential keys that now live on the binding and must NOT appear under
+# [capabilities.credential] in the manifest.
+BINDING_ONLY_CREDENTIAL_KEYS = ("region", "access_key_id")
 
 
 def _iter_strings(value, path):
@@ -75,9 +86,15 @@ def validate(manifest: dict) -> list[str]:
             f"[capabilities.credential].service must be 'athena', got {service!r}"
         )
 
-    region = credential.get("region")
-    if not region:
-        errors.append("[capabilities.credential].region is required and missing")
+    # region and access_key_id now live on the binding, set via
+    # `aileron binding setup --region/--access-key-id`. They must NOT be
+    # pinned in the manifest credential block.
+    for key in BINDING_ONLY_CREDENTIAL_KEYS:
+        if key in credential:
+            errors.append(
+                f"[capabilities.credential].{key} must not be set in the "
+                f"manifest; it comes from the binding now"
+            )
 
     hosts = network.get("hosts", [])
     if not hosts:
@@ -90,14 +107,9 @@ def validate(manifest: dict) -> list[str]:
             )
             continue
         host_region = host[len("athena."):-len(".amazonaws.com:443")]
-        if "." in host_region or not host_region:
+        if not REGION_RE.match(host_region):
             errors.append(
-                f"host {host!r} has a malformed region segment {host_region!r}"
-            )
-        elif host_region != region:
-            errors.append(
-                f"host {host!r} region segment {host_region!r} != "
-                f"[capabilities.credential].region {region!r}"
+                f"host {host!r} has an implausible region segment {host_region!r}"
             )
 
     # No OAuth-style keys anywhere in the manifest.

@@ -26,23 +26,62 @@ name = "github://ALRubinger/aileron-connector-athena"
 version = "0.0.0-dev"
 publisher = "ALRubinger"
 
-# Network capability. This is the only host:port pair this connector is
-# allowed to dial. Anything else is denied at the sandbox boundary with
-# class capability_denied (ADR-0005 acceptance #3).
+# Network capability. These are the only host:port pairs this connector
+# is allowed to dial. Anything else is denied at the sandbox boundary
+# with class capability_denied (ADR-0005 acceptance #3).
 #
-# Athena is a regional service. This host pins ONE region per install.
-# The region segment below is the per-install pin, not a fallback
-# default. Changing region means re-pinning this host and the
-# [capabilities.credential].region field below to the same value.
-# The runtime reads `region` from a required input arg and that arg
-# MUST equal the region pinned here and in [capabilities.credential].
-# A mismatch fails closed: a region the allow-list does not list is
-# capability_denied at the network boundary, and a region that
-# disagrees with the credential produces a SigV4 signature Athena
-# rejects.
+# Athena is a regional service and this connector is multi-region. The
+# allow-list below enumerates one athena.<region>.amazonaws.com:443 host
+# per region where Athena is available in the AWS commercial (`aws`)
+# partition. GovCloud (`aws-us-gov`) and China (`aws-cn`) use different
+# hostnames and separate credentials, so they are out of scope here.
+# This list is generated from the authoritative AWS source at
+# implementation time (the global-infrastructure Athena region list,
+# intersected with the `aws` partition) and emitted sorted for a stable
+# diff. Region availability changes over time, so regenerate from the
+# live source rather than hand-editing.
+#
+# Region is selected per call. The runtime reads `region` from a
+# required input arg and dials athena.<region>.amazonaws.com. The host
+# parses that target region from the outbound host and resolves the
+# matching binding for signing. A region the allow-list does not list is
+# capability_denied at the network boundary.
 [capabilities.network]
 hosts = [
+  "athena.af-south-1.amazonaws.com:443",
+  "athena.ap-east-1.amazonaws.com:443",
+  "athena.ap-east-2.amazonaws.com:443",
+  "athena.ap-northeast-1.amazonaws.com:443",
+  "athena.ap-northeast-2.amazonaws.com:443",
+  "athena.ap-northeast-3.amazonaws.com:443",
+  "athena.ap-south-1.amazonaws.com:443",
+  "athena.ap-south-2.amazonaws.com:443",
+  "athena.ap-southeast-1.amazonaws.com:443",
+  "athena.ap-southeast-2.amazonaws.com:443",
+  "athena.ap-southeast-3.amazonaws.com:443",
+  "athena.ap-southeast-4.amazonaws.com:443",
+  "athena.ap-southeast-5.amazonaws.com:443",
+  "athena.ap-southeast-6.amazonaws.com:443",
+  "athena.ap-southeast-7.amazonaws.com:443",
+  "athena.ca-central-1.amazonaws.com:443",
+  "athena.ca-west-1.amazonaws.com:443",
+  "athena.eu-central-1.amazonaws.com:443",
+  "athena.eu-central-2.amazonaws.com:443",
+  "athena.eu-north-1.amazonaws.com:443",
+  "athena.eu-south-1.amazonaws.com:443",
+  "athena.eu-south-2.amazonaws.com:443",
+  "athena.eu-west-1.amazonaws.com:443",
+  "athena.eu-west-2.amazonaws.com:443",
+  "athena.eu-west-3.amazonaws.com:443",
+  "athena.il-central-1.amazonaws.com:443",
+  "athena.me-central-1.amazonaws.com:443",
+  "athena.me-south-1.amazonaws.com:443",
+  "athena.mx-central-1.amazonaws.com:443",
+  "athena.sa-east-1.amazonaws.com:443",
   "athena.us-east-1.amazonaws.com:443",
+  "athena.us-east-2.amazonaws.com:443",
+  "athena.us-west-1.amazonaws.com:443",
+  "athena.us-west-2.amazonaws.com:443",
 ]
 
 # Credential capability. This is the kind of credential the runtime
@@ -64,15 +103,19 @@ hosts = [
 # It is injected host-side at the network boundary and is never present
 # in source, in this manifest, or in the connector binary.
 #
-# `access_key_id` is a NON-secret identifier (the public half of the
-# key pair, safe to commit), distinct from the secret access key. It
-# is paired with the vault-held secret at signing time. The value
-# below is AWS's documentation example key ID; the publisher replaces
-# it with the install's real access key ID before release.
+# `region` and `access_key_id` come from the binding, not the manifest.
+# An operator sets them per binding with
+# `aileron binding setup --region <r> --access-key-id <id>`. The host
+# selects the binding by the request's target region (parsed from the
+# outbound athena.<region>.amazonaws.com host) and signs with that
+# binding's region and access key id. One install can hold several
+# region-scoped bindings, so this connector is multi-region. The
+# non-secret `access_key_id` (the public half of the key pair) lives on
+# the binding alongside the region; the secret access key stays
+# vault-only.
 #
-# `region`, `service`, and `access_key_id` are all required. Install
-# fails closed if any is absent. `region` MUST equal the region pinned
-# in the network host above. `service` MUST equal "athena".
+# `service` is the only credential field the manifest fixes, and it MUST
+# equal "athena". The binding supplies the rest.
 #
 # Static long-lived keys only. No session or temporary credentials
 # (no `X-Amz-Security-Token`), deferred per ADR-0019.
@@ -82,6 +125,4 @@ hosts = [
 [capabilities.credential]
 kind = "aws_sigv4"
 scope = "Run and inspect Athena queries, fetch query results, and browse Glue Data Catalog databases, tables, and columns; read-only"
-region = "us-east-1"
 service = "athena"
-access_key_id = "AKIAIOSFODNN7EXAMPLE"
