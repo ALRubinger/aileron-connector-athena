@@ -36,12 +36,13 @@ func requireString(args map[string]any, key string) (string, error) {
 // resolveRegion reads the required `region` arg. There is NO default
 // region and no build-time substitution: a missing region is an error
 // surfaced as connector_runtime_error before any host call. The region
-// must equal the region pinned in manifest.toml's
-// [capabilities.network] host and [capabilities.credential].region; the
-// connector only checks presence and the host enforces the pin
-// fail-closed (an unlisted region is capability_denied at the network
-// boundary; a disagreeing region yields a SigV4 signature Athena
-// rejects).
+// selects the AWS endpoint and, via the outbound host, the matching
+// binding. This connector is multi-region: any region whose
+// athena.<region>.amazonaws.com host is in manifest.toml's
+// [capabilities.network] allow-list is valid. The connector only checks
+// presence; the host enforces the allow-list fail-closed (an unlisted
+// region is capability_denied at the network boundary) and signs with
+// the region-matched binding.
 func resolveRegion(args map[string]any) (string, error) {
 	region, err := requireString(args, "region")
 	if err != nil {
@@ -142,8 +143,9 @@ func numericArg(args map[string]any, key string) (float64, bool) {
 // buildAthenaURL assembles the regional Athena endpoint URL for a per-call
 // region arg: https://athena.<region>.amazonaws.com/. It is factored out of
 // doSignedAthena (which is wasip1-gated and so host-untestable) so the URL
-// shape gets host unit-test coverage. It does no validation — the region is
-// already confirmed present by resolveRegion and pin-enforced host-side.
+// shape gets host unit-test coverage. It does no validation: the region is
+// already confirmed present by resolveRegion, and the host enforces the
+// network allow-list fail-closed for any region not in the manifest.
 func buildAthenaURL(region string) string {
 	return "https://athena." + region + ".amazonaws.com/"
 }

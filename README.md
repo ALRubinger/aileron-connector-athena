@@ -53,7 +53,10 @@ in the Aileron docs.
 ## Read-only IAM policy to seal the principal
 
 Attach the policy below to the IAM principal whose static access key the
-binding signs with. The policy grants read access to Athena and Glue
+binding signs with. The policy is per-principal and region-agnostic. The
+Athena and Glue actions it grants are not region-pinned, so one principal
+works across every region you bind. The bound key's region governs SigV4
+signing, not the policy. The policy grants read access to Athena and Glue
 plus the S3 access Athena needs to read source data and write result
 files. There are NO write, DDL, or data-mutation permissions in it. The
 principal cannot create, alter, or drop databases, tables, work groups,
@@ -152,28 +155,32 @@ and no build-time substitution. A missing `region` is a connector error
 raised before any host call (`resolveRegion` / `requireString` in
 `connector/helpers.go`).
 
-One region per install. The runtime `region` arg must equal all of the
-following, which must all agree:
+Region is selected per call. The runtime `region` arg picks the AWS
+endpoint the connector dials (`athena.<region>.amazonaws.com`). The host
+parses that target region from the outbound host and resolves the
+binding scoped to it, then signs with that binding's region and access
+key id. One install serves many regions this way.
 
-- the region pinned in `connector/manifest.toml`'s
-  `[capabilities.network]` host (`athena.us-east-1.amazonaws.com:443`),
-- `[capabilities.credential].region` in the same manifest (`us-east-1`),
-- the region of the work group and the S3 output location you query
-  against.
+The `[capabilities.network]` allow-list in `connector/manifest.toml`
+enumerates every region this connector supports. It lists one
+`athena.<region>.amazonaws.com:443` host per region where Athena is
+available in the AWS commercial partition. A region the allow-list does
+not list is denied as `capability_denied` at the network boundary.
 
-A mismatch fails closed. A region the network allow-list does not list is
-denied as `capability_denied` at the network boundary. A region that
-disagrees with the credential produces a SigV4 signature Athena rejects.
-To run against a different region, re-pin the manifest network host and
-`[capabilities.credential].region` to that region and rebind.
+To serve a region, set up a binding for it with
+`aileron binding setup --region <r> --access-key-id <id>` (see [Binding
+setup](#binding-setup)). The bound key's region governs SigV4 signing.
+The runtime `region` arg, the binding region, and the region of the work
+group and S3 output location you query against must all agree for a
+given call.
 
 `WorkGroup` and `ResultConfiguration.OutputLocation` are optional inputs
 to `start_query_execution`. A work group can pin its own result location
 through its configuration, in which case you do not pass
 `ResultConfiguration.OutputLocation` per call. Whichever location applies,
 the results S3 bucket must be in the same region as the Athena endpoint
-and the credential, and that bucket is the one the
-`AthenaResultsLocation` policy statement above scopes.
+you target, and that bucket is the one the `AthenaResultsLocation` policy
+statement above scopes.
 
 ## Operations
 
@@ -233,15 +240,16 @@ your agent:
 ```sh
 # Install the connector and an action. Replace <version> with a tag
 # from the releases page. The Aileron resolver requires a pinned
-# version per ADR-0004 — there is no `latest` channel.
+# version per ADR-0004. There is no `latest` channel.
 aileron connector install github://ALRubinger/aileron-connector-athena@<version>
 aileron action add github://ALRubinger/aileron-connector-athena/actions/start-query-execution@<version>
 
-# Bind the static AWS access key for the aws_sigv4 credential kind.
-# The setup prompts for access_key_id, region, and service (see below);
-# the secret access key is stored vault-only and the connector never
-# sees it.
-aileron binding setup github://ALRubinger/aileron-connector-athena@<version>
+# Bind a static AWS access key for the aws_sigv4 credential kind. Pass
+# the target region and the NON-secret access key id as flags. The
+# setup prompts for the secret access key, which is stored vault-only
+# and the connector never sees.
+aileron binding setup github://ALRubinger/aileron-connector-athena@<version> \
+  --region us-east-1 --access-key-id <access-key-id>
 
 # Launch your agent. Aileron exposes the action via MCP.
 aileron launch claude
@@ -252,23 +260,30 @@ aileron launch claude
 # gate, and returns the QueryExecutionId to poll.
 ```
 
-The `aileron binding setup` step prompts for the binding fields the
-manifest declares:
+`aileron action add-suite github://ALRubinger/aileron-connector-athena/suite.toml@<version>`
+installs the suite and connector together and auto-prompts for the
+`aws_sigv4` binding when none exists, mirroring the OAuth sibling
+connectors.
 
-- `access_key_id`: the AWS access key id. This is the NON-secret half
-  of the key pair, the public identifier. It is safe to record. The
-  committed manifest placeholder is AWS's documentation example id
-  `AKIAIOSFODNN7EXAMPLE`.
-- `region`: the one region this install runs against (see above). It
-  must match the manifest network host and credential region.
-- `service`: `athena`. It must equal the `service` the manifest
-  declares.
+The binding carries the region and access key id; the manifest fixes only
+the credential kind and service:
+
+- `--region`: the AWS region this binding signs for. The host selects
+  this binding when a call targets that region (see [Region, work group,
+  and output location](#region-work-group-and-output-location)). Bind one
+  region per binding. Add more bindings to serve more regions from a
+  single install.
+- `--access-key-id`: the AWS access key id. This is the NON-secret half
+  of the key pair, the public identifier. It is safe to record. It lives
+  on the binding alongside the region.
+- The secret access key is prompted for and stored vault-only.
+- `service` is `athena` and is fixed by the manifest, not the binding.
 
 The secret access key is the only secret. It is stored vault-only and is
 never present in source, in the manifest, or in the connector binary. The
-host pairs it with `access_key_id` at signing time and injects the
-`Authorization`, `X-Amz-Date`, and `X-Amz-Content-Sha256` headers at the
-network boundary. The connector never sees it.
+host pairs it with the binding's `access_key_id` at signing time and
+injects the `Authorization`, `X-Amz-Date`, and `X-Amz-Content-Sha256`
+headers at the network boundary. The connector never sees it.
 
 ### Static keys only
 

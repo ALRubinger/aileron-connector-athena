@@ -41,7 +41,7 @@ required = true
 [[inputs]]
 name = "region"
 type = "string"
-description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, with no default. It must equal the region pinned in the connector manifest's [capabilities.network] host and [capabilities.credential].region. A region the allow-list does not list fails closed as capability_denied at the network boundary. A region that disagrees with the credential yields a SigV4 signature Athena rejects."
+description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, with no default. The region selects the AWS endpoint the connector dials (athena.<region>.amazonaws.com) and, via the outbound host, the binding the host signs with. Any region whose host is in the connector manifest's [capabilities.network] allow-list is valid. A region the allow-list does not list fails closed as capability_denied at the network boundary."
 required = true
 
 [[inputs]]
@@ -76,7 +76,7 @@ already stopped is a no-op against the same execution id, so the
 runtime's retry layer may safely re-issue it on a transient failure.
 
 The connector runs in the Aileron WASM sandbox with
-`[capabilities.network]` pinned to the one regional Athena host. Each
+`[capabilities.network]` allow-listing the regional Athena hosts. Each
 request is marked `credential = "aws_sigv4"` and signed host-side with
 SigV4 at the network boundary. The connector never sees the secret
 access key. See ADR-0005 (sandbox and credential mediation) and
