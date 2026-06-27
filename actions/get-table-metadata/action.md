@@ -35,19 +35,19 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "CatalogName"
+name = "catalog_name"
 type = "string"
 description = "The data catalog that holds the table, for example \"AwsDataCatalog\". As returned by list-data-catalogs."
 required = true
 
 [[inputs]]
-name = "DatabaseName"
+name = "database_name"
 type = "string"
 description = "The database that holds the table, as returned by list-databases in DatabaseList[].Name."
 required = true
 
 [[inputs]]
-name = "TableName"
+name = "table_name"
 type = "string"
 description = "The table to look up, as returned by list-table-metadata in TableMetadataList[].Name."
 required = true

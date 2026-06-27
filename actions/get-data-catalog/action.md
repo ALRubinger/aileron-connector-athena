@@ -35,13 +35,13 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "Name"
+name = "name"
 type = "string"
 description = "The data catalog to look up, for example \"AwsDataCatalog\". As returned by list-data-catalogs in DataCatalogsSummary[].CatalogName."
 required = true
 
 [[inputs]]
-name = "WorkGroup"
+name = "work_group"
 type = "string"
 description = "Optional work group name. Scopes the lookup to the catalog as seen from a specific Athena work group."
 required = false

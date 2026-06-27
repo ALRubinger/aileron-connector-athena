@@ -35,31 +35,31 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "CatalogName"
+name = "catalog_name"
 type = "string"
 description = "The data catalog that holds the database, for example \"AwsDataCatalog\". As returned by list-data-catalogs."
 required = true
 
 [[inputs]]
-name = "DatabaseName"
+name = "database_name"
 type = "string"
 description = "The database whose tables to list, as returned by list-databases in DatabaseList[].Name."
 required = true
 
 [[inputs]]
-name = "Expression"
+name = "expression"
 type = "string"
 description = "Optional name filter expression. Restricts the listing to tables whose names match the expression, for example \"orders\" to find tables containing that substring."
 required = false
 
 [[inputs]]
-name = "MaxResults"
+name = "max_results"
 type = "integer"
 description = "Optional maximum number of tables to return in one page. Omit to take Athena's default page size."
 required = false
 
 [[inputs]]
-name = "NextToken"
+name = "next_token"
 type = "string"
 description = "Optional paging token from a previous ListTableMetadata response. Pass it to fetch the next page."
 required = false

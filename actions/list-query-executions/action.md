@@ -35,19 +35,19 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "WorkGroup"
+name = "work_group"
 type = "string"
 description = "Optional work group name. Scopes the listing to query executions in one Athena work group. Omit to list across the default work group."
 required = false
 
 [[inputs]]
-name = "MaxResults"
+name = "max_results"
 type = "integer"
 description = "Optional maximum number of execution ids to return in one page. Omit to take Athena's default page size."
 required = false
 
 [[inputs]]
-name = "NextToken"
+name = "next_token"
 type = "string"
 description = "Optional paging token from a previous ListQueryExecutions response. Pass it to fetch the next page."
 required = false

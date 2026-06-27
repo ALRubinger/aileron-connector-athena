@@ -35,32 +35,32 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "QueryString"
+name = "query_string"
 type = "string"
 description = "The SQL text to execute. Only read-only statements are accepted: SELECT, WITH, SHOW, DESCRIBE, DESC, EXPLAIN, and VALUES. EXPLAIN ANALYZE is rejected because it executes the statement, and stacked statements (a second statement after a semicolon) are rejected. A single trailing semicolon is allowed."
 required = true
 multiline = true
 
 [[inputs]]
-name = "QueryExecutionContext"
+name = "query_execution_context"
 type = "object"
 description = "Optional execution context object with the shape {Database, Catalog}. Sets the default database and data catalog the query runs against. Passed through to Athena verbatim only when present."
 required = false
 
 [[inputs]]
-name = "ResultConfiguration"
+name = "result_configuration"
 type = "object"
 description = "Optional result configuration object with the shape {OutputLocation, ...}. Selects where Athena writes the query results, for example {\"OutputLocation\": \"s3://bucket/prefix/\"}. Passed through to Athena verbatim only when present."
 required = false
 
 [[inputs]]
-name = "WorkGroup"
+name = "work_group"
 type = "string"
 description = "Optional work group name. Scopes the query to a specific Athena work group, which can pin its own result location and limits."
 required = false
 
 [[inputs]]
-name = "ClientRequestToken"
+name = "client_request_token"
 type = "string"
 description = "Optional caller-supplied idempotency token. Athena treats two StartQueryExecution calls carrying the same token as the same request. This token is passthrough only and the connector never derives or synthesizes it. Because the caller owns idempotency here, this action is declared idempotent = false at the manifest level."
 required = false
@@ -97,7 +97,7 @@ principal the host signs requests as, which cannot perform writes or
 DDL regardless of the SQL submitted.
 
 This action is declared `idempotent = false`. Athena's own idempotency
-is caller-driven through the optional `ClientRequestToken`. Two calls
+is caller-driven through the optional `client_request_token`. Two calls
 without a shared token start two separate query executions, so the
 manifest leaves idempotency to the caller rather than asserting it.
 

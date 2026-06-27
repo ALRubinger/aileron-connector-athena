@@ -35,7 +35,7 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "QueryExecutionIds"
+name = "query_execution_ids"
 type = "array"
 items_type = "string"
 description = "A non-empty list of query execution id strings to look up in one call, for example [\"abc-123\", \"def-456\"]. Each id is a string returned by start-query-execution or list-query-executions."
