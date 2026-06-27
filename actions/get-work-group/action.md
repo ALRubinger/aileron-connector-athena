@@ -35,7 +35,7 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "WorkGroup"
+name = "work_group"
 type = "string"
 description = "The work group to look up, as returned by list-work-groups in WorkGroups[].Name."
 required = true

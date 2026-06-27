@@ -27,13 +27,13 @@
 //
 //	{"op": "start_query_execution",
 //	 "args": {"region": "us-east-1",
-//	          "QueryString": "SELECT 1",
-//	          "QueryExecutionContext": {"Database": "default"},
-//	          "ResultConfiguration": {"OutputLocation": "s3://bucket/prefix/"}}}
+//	          "query_string": "SELECT 1",
+//	          "query_execution_context": {"Database": "default"},
+//	          "result_configuration": {"OutputLocation": "s3://bucket/prefix/"}}}
 //	  → {"output": {"QueryExecutionId": "..."}}
 //
 //	{"op": "get_query_execution",
-//	 "args": {"region": "us-east-1", "QueryExecutionId": "..."}}
+//	 "args": {"region": "us-east-1", "query_execution_id": "..."}}
 //	  → {"output": {"QueryExecution": {"Status": {"State": "SUCCEEDED"}, ...}}}
 //
 // The connector exposes all 14 read-path Athena ops: start_query_execution,
@@ -378,7 +378,7 @@ func runQuery(args map[string]any) {
 	}
 
 	// Poll to a terminal state, bounded by the overall deadline.
-	getExecBody, err := buildGetQueryExecution(map[string]any{"QueryExecutionId": queryID})
+	getExecBody, err := buildGetQueryExecution(map[string]any{"query_execution_id": queryID})
 	if err != nil {
 		writeError("connector_runtime_error", "run_query: "+err.Error())
 		return
@@ -431,9 +431,9 @@ func runQueryFetchResults(region, queryID string) {
 	var pages []map[string]any
 	nextToken := ""
 	for {
-		resultArgs := map[string]any{"QueryExecutionId": queryID}
+		resultArgs := map[string]any{"query_execution_id": queryID}
 		if nextToken != "" {
-			resultArgs["NextToken"] = nextToken
+			resultArgs["next_token"] = nextToken
 		}
 		body, err := buildGetQueryResults(resultArgs)
 		if err != nil {

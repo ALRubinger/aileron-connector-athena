@@ -109,10 +109,10 @@ func requireStringSlice(args map[string]any, key string) ([]string, error) {
 // and emits MaxResults as a number so it serializes back to a JSON integer.
 // A MaxResults arg that is absent or of an unusable type is simply omitted.
 func applyPaging(payload map[string]any, args map[string]any) {
-	if v, ok := numericArg(args, "MaxResults"); ok {
+	if v, ok := numericArg(args, "max_results"); ok {
 		payload["MaxResults"] = v
 	}
-	if tok, ok := optionalString(args, "NextToken"); ok {
+	if tok, ok := optionalString(args, "next_token"); ok {
 		payload["NextToken"] = tok
 	}
 }
@@ -180,7 +180,7 @@ func buildAthenaTarget(action string) string {
 // doSignedAthena. The body is emitted as AWS-JSON-1.1 (a plain JSON
 // object).
 func buildStartQueryExecution(args map[string]any) ([]byte, error) {
-	queryString, err := requireString(args, "QueryString")
+	queryString, err := requireString(args, "query_string")
 	if err != nil {
 		return nil, err
 	}
@@ -191,16 +191,16 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 	payload := map[string]any{
 		"QueryString": queryString,
 	}
-	if ctx := optionalMap(args, "QueryExecutionContext"); ctx != nil {
+	if ctx := optionalMap(args, "query_execution_context"); ctx != nil {
 		payload["QueryExecutionContext"] = ctx
 	}
-	if rc := optionalMap(args, "ResultConfiguration"); rc != nil {
+	if rc := optionalMap(args, "result_configuration"); rc != nil {
 		payload["ResultConfiguration"] = rc
 	}
-	if wg, ok := args["WorkGroup"].(string); ok && wg != "" {
+	if wg, ok := args["work_group"].(string); ok && wg != "" {
 		payload["WorkGroup"] = wg
 	}
-	if token, ok := args["ClientRequestToken"].(string); ok && token != "" {
+	if token, ok := args["client_request_token"].(string); ok && token != "" {
 		payload["ClientRequestToken"] = token
 	}
 
@@ -214,7 +214,7 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 //
 //	QueryExecutionId (string) — the id returned by StartQueryExecution.
 func buildGetQueryExecution(args map[string]any) ([]byte, error) {
-	id, err := requireString(args, "QueryExecutionId")
+	id, err := requireString(args, "query_execution_id")
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +234,7 @@ func buildGetQueryExecution(args map[string]any) ([]byte, error) {
 //
 //	MaxResults (number), NextToken (string) — standard paging.
 func buildGetQueryResults(args map[string]any) ([]byte, error) {
-	id, err := requireString(args, "QueryExecutionId")
+	id, err := requireString(args, "query_execution_id")
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +255,7 @@ func buildGetQueryResults(args map[string]any) ([]byte, error) {
 // declared in actions/stop-query-execution/action.md (issue #8), NOT here.
 // This builder produces only the request body; it adds no gating logic.
 func buildStopQueryExecution(args map[string]any) ([]byte, error) {
-	id, err := requireString(args, "QueryExecutionId")
+	id, err := requireString(args, "query_execution_id")
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func buildStopQueryExecution(args map[string]any) ([]byte, error) {
 // With no args it emits a valid empty JSON object ({}).
 func buildListQueryExecutions(args map[string]any) ([]byte, error) {
 	payload := map[string]any{}
-	if wg, ok := optionalString(args, "WorkGroup"); ok {
+	if wg, ok := optionalString(args, "work_group"); ok {
 		payload["WorkGroup"] = wg
 	}
 	applyPaging(payload, args)
@@ -290,7 +290,7 @@ func buildListQueryExecutions(args map[string]any) ([]byte, error) {
 //
 //	QueryExecutionIds ([]string) — non-empty array of execution ids.
 func buildBatchGetQueryExecution(args map[string]any) ([]byte, error) {
-	ids, err := requireStringSlice(args, "QueryExecutionIds")
+	ids, err := requireStringSlice(args, "query_execution_ids")
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func buildBatchGetQueryExecution(args map[string]any) ([]byte, error) {
 //
 //	MaxResults (number), NextToken (string).
 func buildListDatabases(args map[string]any) ([]byte, error) {
-	catalog, err := requireString(args, "CatalogName")
+	catalog, err := requireString(args, "catalog_name")
 	if err != nil {
 		return nil, err
 	}
@@ -326,11 +326,11 @@ func buildListDatabases(args map[string]any) ([]byte, error) {
 //
 //	CatalogName (string), DatabaseName (string).
 func buildGetDatabase(args map[string]any) ([]byte, error) {
-	catalog, err := requireString(args, "CatalogName")
+	catalog, err := requireString(args, "catalog_name")
 	if err != nil {
 		return nil, err
 	}
-	database, err := requireString(args, "DatabaseName")
+	database, err := requireString(args, "database_name")
 	if err != nil {
 		return nil, err
 	}
@@ -351,11 +351,11 @@ func buildGetDatabase(args map[string]any) ([]byte, error) {
 //
 //	Expression (string), MaxResults (number), NextToken (string).
 func buildListTableMetadata(args map[string]any) ([]byte, error) {
-	catalog, err := requireString(args, "CatalogName")
+	catalog, err := requireString(args, "catalog_name")
 	if err != nil {
 		return nil, err
 	}
-	database, err := requireString(args, "DatabaseName")
+	database, err := requireString(args, "database_name")
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +363,7 @@ func buildListTableMetadata(args map[string]any) ([]byte, error) {
 		"CatalogName":  catalog,
 		"DatabaseName": database,
 	}
-	if expr, ok := optionalString(args, "Expression"); ok {
+	if expr, ok := optionalString(args, "expression"); ok {
 		payload["Expression"] = expr
 	}
 	applyPaging(payload, args)
@@ -377,15 +377,15 @@ func buildListTableMetadata(args map[string]any) ([]byte, error) {
 //
 //	CatalogName (string), DatabaseName (string), TableName (string).
 func buildGetTableMetadata(args map[string]any) ([]byte, error) {
-	catalog, err := requireString(args, "CatalogName")
+	catalog, err := requireString(args, "catalog_name")
 	if err != nil {
 		return nil, err
 	}
-	database, err := requireString(args, "DatabaseName")
+	database, err := requireString(args, "database_name")
 	if err != nil {
 		return nil, err
 	}
-	table, err := requireString(args, "TableName")
+	table, err := requireString(args, "table_name")
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func buildListWorkGroups(args map[string]any) ([]byte, error) {
 //
 //	WorkGroup (string).
 func buildGetWorkGroup(args map[string]any) ([]byte, error) {
-	wg, err := requireString(args, "WorkGroup")
+	wg, err := requireString(args, "work_group")
 	if err != nil {
 		return nil, err
 	}
@@ -451,12 +451,12 @@ func buildListDataCatalogs(args map[string]any) ([]byte, error) {
 //
 //	WorkGroup (string).
 func buildGetDataCatalog(args map[string]any) ([]byte, error) {
-	name, err := requireString(args, "Name")
+	name, err := requireString(args, "name")
 	if err != nil {
 		return nil, err
 	}
 	payload := map[string]any{"Name": name}
-	if wg, ok := optionalString(args, "WorkGroup"); ok {
+	if wg, ok := optionalString(args, "work_group"); ok {
 		payload["WorkGroup"] = wg
 	}
 	return json.Marshal(payload)
@@ -475,7 +475,7 @@ const defaultRunQueryTimeoutSeconds = 180
 // out of the wasip1-gated poll loop so the default/override policy is host
 // unit-testable.
 func resolveTimeoutSeconds(args map[string]any) int {
-	if v, ok := numericArg(args, "TimeoutSeconds"); ok && v > 0 {
+	if v, ok := numericArg(args, "timeout_seconds"); ok && v > 0 {
 		return int(v)
 	}
 	return defaultRunQueryTimeoutSeconds

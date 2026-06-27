@@ -35,13 +35,13 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "MaxResults"
+name = "max_results"
 type = "integer"
 description = "Optional maximum number of work groups to return in one page. Omit to take Athena's default page size."
 required = false
 
 [[inputs]]
-name = "NextToken"
+name = "next_token"
 type = "string"
 description = "Optional paging token from a previous ListWorkGroups response. Pass it to fetch the next page."
 required = false

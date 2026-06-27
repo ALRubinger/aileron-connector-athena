@@ -35,38 +35,38 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "QueryString"
+name = "query_string"
 type = "string"
 description = "The SQL text to execute. Only read-only statements are accepted: SELECT, WITH, SHOW, DESCRIBE, DESC, EXPLAIN, and VALUES. EXPLAIN ANALYZE is rejected because it executes the statement, and stacked statements (a second statement after a semicolon) are rejected. A single trailing semicolon is allowed."
 required = true
 multiline = true
 
 [[inputs]]
-name = "QueryExecutionContext"
+name = "query_execution_context"
 type = "object"
 description = "Optional execution context object with the shape {Database, Catalog}. Sets the default database and data catalog the query runs against. Passed through to Athena verbatim only when present."
 required = false
 
 [[inputs]]
-name = "ResultConfiguration"
+name = "result_configuration"
 type = "object"
 description = "Optional result configuration object with the shape {OutputLocation, ...}. Selects where Athena writes the query results, for example {\"OutputLocation\": \"s3://bucket/prefix/\"}. Passed through to Athena verbatim only when present."
 required = false
 
 [[inputs]]
-name = "WorkGroup"
+name = "work_group"
 type = "string"
 description = "Optional work group name. Scopes the query to a specific Athena work group, which can pin its own result location and limits."
 required = false
 
 [[inputs]]
-name = "ClientRequestToken"
+name = "client_request_token"
 type = "string"
 description = "Optional caller-supplied idempotency token. Athena treats two StartQueryExecution calls carrying the same token as the same request. This token is passthrough only and the connector never derives or synthesizes it. Because the caller owns idempotency here, this action is declared idempotent = false at the manifest level."
 required = false
 
 [[inputs]]
-name = "TimeoutSeconds"
+name = "timeout_seconds"
 type = "integer"
 description = "Optional overall budget, in seconds, for the wait loop to drive the query to a terminal state. Defaults to 180 (three minutes), mirroring the connector's live round-trip test ceiling. A query still QUEUED or RUNNING when the budget is spent fails with a connector_runtime_error rather than hanging. A non-positive or non-numeric value falls back to the default."
 required = false
@@ -102,7 +102,7 @@ Pair with:
 - `stop-query-execution` to cancel a query that is still running.
 
 Bounded wait. The wait loop polls every two seconds and is bounded by
-`TimeoutSeconds` (default 180). A query that is still `QUEUED` or
+`timeout_seconds` (default 180). A query that is still `QUEUED` or
 `RUNNING` when the budget is spent fails with a `connector_runtime_error`
 rather than hanging the call. A `FAILED` or `CANCELLED` execution fails
 with an `external_api_error` carrying Athena's `StateChangeReason`.
@@ -120,7 +120,7 @@ as, which cannot perform writes or DDL regardless of the SQL submitted.
 This action is declared `idempotent = false`. Like
 `start-query-execution`, each call submits a fresh execution and returns
 a new `QueryExecutionId`. Athena's own idempotency is caller-driven
-through the optional `ClientRequestToken`; two calls without a shared
+through the optional `client_request_token`; two calls without a shared
 token start two separate executions, so the manifest leaves idempotency
 to the caller rather than asserting it.
 

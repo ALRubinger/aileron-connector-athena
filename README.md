@@ -174,10 +174,10 @@ The runtime `region` arg, the binding region, and the region of the work
 group and S3 output location you query against must all agree for a
 given call.
 
-`WorkGroup` and `ResultConfiguration.OutputLocation` are optional inputs
+`work_group` and `result_configuration.OutputLocation` are optional inputs
 to `start_query_execution`. A work group can pin its own result location
 through its configuration, in which case you do not pass
-`ResultConfiguration.OutputLocation` per call. Whichever location applies,
+`result_configuration.OutputLocation` per call. Whichever location applies,
 the results S3 bucket must be in the same region as the Athena endpoint
 you target, and that bucket is the one the `AthenaResultsLocation` policy
 statement above scopes.
@@ -225,14 +225,14 @@ read results.
 
 1. `start_query_execution` submits the SQL and returns a
    `QueryExecutionId`. The SQL passes the read-only gate first. Optional
-   `QueryExecutionContext` (database and catalog), `ResultConfiguration`
-   (output location), and `WorkGroup` are passed through when supplied.
-2. `get_query_execution` reports the lifecycle state for that
-   `QueryExecutionId`. Poll it until the state reaches `SUCCEEDED`,
-   `FAILED`, or `CANCELLED`. A `FAILED` state carries a reason in the
-   response.
+   `query_execution_context` (database and catalog), `result_configuration`
+   (output location), and `work_group` are passed through when supplied.
+2. `get_query_execution` reports the lifecycle state for that execution,
+   keyed by the `query_execution_id` input. Poll it until the state
+   reaches `SUCCEEDED`, `FAILED`, or `CANCELLED`. A `FAILED` state carries
+   a reason in the response.
 3. `get_query_results` pages the rows of a `SUCCEEDED` query, by
-   `QueryExecutionId`, with `MaxResults` and `NextToken` paging.
+   `query_execution_id`, with `max_results` and `next_token` paging.
 4. `stop_query_execution` cancels a query that is still `QUEUED` or
    `RUNNING`. This is the one approval-gated step.
 
@@ -248,7 +248,7 @@ caller. It internalizes the whole lifecycle in one synchronous op:
    (`validateReadOnlySQL`) the async path applies — a non-read query fails
    in-connector before any AWS call.
 2. Poll `GetQueryExecution` every two seconds until the execution reaches
-   a terminal state, bounded by an overall budget (`TimeoutSeconds`,
+   a terminal state, bounded by an overall budget (`timeout_seconds`,
    default 180). A still-`QUEUED`/`RUNNING` query at the deadline fails
    with `connector_runtime_error`; a `FAILED`/`CANCELLED` execution fails
    with `external_api_error` carrying Athena's `StateChangeReason`.
@@ -257,9 +257,9 @@ caller. It internalizes the whole lifecycle in one synchronous op:
    `ResultSetMetadata` once.
 
 The response is `{QueryExecutionId, ResultSet}`. `run_query` takes the
-same `region` / `QueryString` / `QueryExecutionContext` /
-`ResultConfiguration` / `WorkGroup` / `ClientRequestToken` inputs as
-`start_query_execution`, plus the optional `TimeoutSeconds`. It is
+same `region` / `query_string` / `query_execution_context` /
+`result_configuration` / `work_group` / `client_request_token` inputs as
+`start_query_execution`, plus the optional `timeout_seconds`. It is
 additive: the three async ops stay as-is for the agentic flow. It adds no
 new network host or credential — every internal call goes through the same
 signed Athena boundary with the same `aws_sigv4` credential.

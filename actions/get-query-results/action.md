@@ -35,19 +35,19 @@ description = "AWS region of the Athena endpoint, e.g. \"us-east-1\". Required, 
 required = true
 
 [[inputs]]
-name = "QueryExecutionId"
+name = "query_execution_id"
 type = "string"
 description = "The query execution id of a SUCCEEDED query, as returned by start-query-execution and confirmed SUCCEEDED by get-query-execution."
 required = true
 
 [[inputs]]
-name = "MaxResults"
+name = "max_results"
 type = "integer"
 description = "Optional maximum number of result rows to return in one page. Omit to take Athena's default page size."
 required = false
 
 [[inputs]]
-name = "NextToken"
+name = "next_token"
 type = "string"
 description = "Optional paging token from a previous GetQueryResults response. Pass it to fetch the next page of rows."
 required = false

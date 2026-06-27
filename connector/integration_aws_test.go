@@ -147,12 +147,12 @@ func TestIntegrationAthenaRoundTrip(t *testing.T) {
 	//    including its read-only SQL gate (validateReadOnlySQL). A
 	//    non-read query would fail here, in-connector, before any AWS call.
 	startArgs := map[string]any{
-		"region":      region,
-		"QueryString": query,
-		"WorkGroup":   workgroup,
+		"region":       region,
+		"query_string": query,
+		"work_group":   workgroup,
 	}
 	if output != "" {
-		startArgs["ResultConfiguration"] = map[string]any{
+		startArgs["result_configuration"] = map[string]any{
 			"OutputLocation": output,
 		}
 	}
@@ -171,8 +171,8 @@ func TestIntegrationAthenaRoundTrip(t *testing.T) {
 	//    connector's builder. SUCCEEDED is the only acceptable terminal
 	//    state; FAILED/CANCELLED fail the test with Athena's reason.
 	getExecBody, err := buildGetQueryExecution(map[string]any{
-		"region":           region,
-		"QueryExecutionId": queryID,
+		"region":             region,
+		"query_execution_id": queryID,
 	})
 	if err != nil {
 		t.Fatalf("buildGetQueryExecution: %v", err)
@@ -186,8 +186,8 @@ func TestIntegrationAthenaRoundTrip(t *testing.T) {
 	// 3. GetQueryResults — body built by the connector's builder. A
 	//    SUCCEEDED SELECT must return a non-empty ResultSet with rows.
 	resultsBody, err := buildGetQueryResults(map[string]any{
-		"region":           region,
-		"QueryExecutionId": queryID,
+		"region":             region,
+		"query_execution_id": queryID,
 	})
 	if err != nil {
 		t.Fatalf("buildGetQueryResults: %v", err)
