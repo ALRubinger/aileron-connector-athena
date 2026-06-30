@@ -66,6 +66,12 @@ description = "Optional caller-supplied idempotency token. Athena treats two Sta
 required = false
 
 [[inputs]]
+name = "idempotency_salt"
+type = "string"
+description = "Optional opaque salt that forces a fresh execution for an otherwise-identical request. When you omit client_request_token, the connector derives a deterministic idempotency token from the canonical request; supplying a salt folds it into that derivation so the same logical query with a different salt yields a distinct token and a distinct execution. The salt is never sent to Athena as a request field — it only influences the derived token. When absent, behavior is unchanged. Ignored when client_request_token is supplied (an explicit token already controls idempotency). Use it to recover from a 400 IDEMPOTENT_PARAMETER_MISMATCH (a derived-token collision with a prior run whose parameters differed, e.g. a changed work-group result location)."
+required = false
+
+[[inputs]]
 name = "execution_parameters"
 type = "array"
 items_type = "string"
@@ -110,10 +116,19 @@ deterministic token — the hex-encoded SHA-256 of the canonical request
 group). Because the token is a pure function of the request, two
 identical calls carry the same token and Athena collapses them onto a
 single query execution rather than starting a second one. A caller that
-wants distinct executions for an identical request can vary the request
-or supply its own `client_request_token`. Replaying the same request
-therefore does not spawn duplicate work, which is what makes the action
-safe to declare idempotent.
+wants distinct executions for an identical request can vary the request,
+pass an `idempotency_salt` (folded into the derived token without being
+sent to Athena), or supply its own `client_request_token`. Replaying the
+same request therefore does not spawn duplicate work, which is what makes
+the action safe to declare idempotent.
+
+If Athena replies with a 400 `IDEMPOTENT_PARAMETER_MISMATCH`, the derived
+token collided with a prior execution that used the same logical request
+but different parameters — for example a work-group result location that
+changed since the first run. The connector reports this as an
+`external_api_error` that names the code and points you at
+`idempotency_salt` (or an explicit `client_request_token`) to mint a
+fresh token and force a new execution.
 
 The connector runs in the Aileron WASM sandbox with
 `[capabilities.network]` allow-listing the regional Athena hosts. Each

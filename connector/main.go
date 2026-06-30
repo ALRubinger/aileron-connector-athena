@@ -206,7 +206,14 @@ func dispatch(op, target string, args map[string]any, build bodyBuilder) {
 		return
 	}
 	if status < 200 || status >= 300 {
-		writeError("external_api_error", fmt.Sprintf("Athena API returned %d: %s", status, string(respBody)))
+		// Scope the IDEMPOTENT_PARAMETER_MISMATCH rewrite to
+		// StartQueryExecution so it cannot mis-fire on the other 13 ops;
+		// every other target keeps the verbatim passthrough.
+		if target == "StartQueryExecution" {
+			writeError("external_api_error", startQueryExecutionErrorMessage(status, respBody))
+		} else {
+			writeError("external_api_error", fmt.Sprintf("Athena API returned %d: %s", status, string(respBody)))
+		}
 		return
 	}
 	var parsed map[string]any
@@ -363,7 +370,10 @@ func runQuery(args map[string]any) {
 		return
 	}
 	if status < 200 || status >= 300 {
-		writeError("external_api_error", fmt.Sprintf("run_query: StartQueryExecution returned %d: %s", status, string(startResp)))
+		// Same StartQueryExecution-scoped IDEMPOTENT_PARAMETER_MISMATCH
+		// rewrite as the async start_query_execution path; the run_query
+		// prefix is kept so the message names the orchestration op.
+		writeError("external_api_error", "run_query: "+startQueryExecutionErrorMessage(status, startResp))
 		return
 	}
 	var started map[string]any
