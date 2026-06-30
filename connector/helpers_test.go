@@ -106,19 +106,25 @@ func TestBuildStartQueryExecution_Minimal(t *testing.T) {
 		t.Fatalf("QueryString = %v, want SELECT 1", m["QueryString"])
 	}
 	// Optional members must be absent when not supplied.
-	for _, k := range []string{"QueryExecutionContext", "ResultConfiguration", "WorkGroup", "ClientRequestToken"} {
+	for _, k := range []string{"QueryExecutionContext", "ResultConfiguration", "WorkGroup"} {
 		if _, present := m[k]; present {
 			t.Fatalf("optional field %q should be absent when not supplied", k)
 		}
+	}
+	// ClientRequestToken is the exception: it is always emitted, synthesized
+	// deterministically when the caller does not supply one, because Athena
+	// rejects a null/empty token.
+	if token, ok := m["ClientRequestToken"].(string); !ok || token == "" {
+		t.Fatalf("ClientRequestToken should be synthesized when not supplied, got %v", m["ClientRequestToken"])
 	}
 }
 
 func TestBuildStartQueryExecution_OptionalsIncludedWhenPresent(t *testing.T) {
 	args := map[string]any{
-		"query_string":           "SELECT * FROM t",
+		"query_string":            "SELECT * FROM t",
 		"query_execution_context": map[string]any{"Database": "default", "Catalog": "awsdatacatalog"},
-		"result_configuration":   map[string]any{"OutputLocation": "s3://bucket/prefix/"},
-		"work_group":             "primary",
+		"result_configuration":    map[string]any{"OutputLocation": "s3://bucket/prefix/"},
+		"work_group":              "primary",
 		"client_request_token":    "caller-supplied-token-123",
 	}
 	b, err := buildStartQueryExecution(args)
@@ -138,7 +144,7 @@ func TestBuildStartQueryExecution_OptionalsIncludedWhenPresent(t *testing.T) {
 	if m["WorkGroup"] != "primary" {
 		t.Fatalf("WorkGroup = %v, want primary", m["WorkGroup"])
 	}
-	// ClientRequestToken is passthrough-only: exactly as given, never derived.
+	// A caller-supplied non-empty token is honored verbatim, never derived.
 	if m["ClientRequestToken"] != "caller-supplied-token-123" {
 		t.Fatalf("ClientRequestToken = %v, want caller-supplied-token-123", m["ClientRequestToken"])
 	}
@@ -146,8 +152,8 @@ func TestBuildStartQueryExecution_OptionalsIncludedWhenPresent(t *testing.T) {
 
 func TestBuildStartQueryExecution_EmptyOptionalsOmitted(t *testing.T) {
 	args := map[string]any{
-		"query_string":        "SELECT 1",
-		"work_group":          "",
+		"query_string":         "SELECT 1",
+		"work_group":           "",
 		"client_request_token": "",
 	}
 	b, err := buildStartQueryExecution(args)
@@ -158,9 +164,48 @@ func TestBuildStartQueryExecution_EmptyOptionalsOmitted(t *testing.T) {
 	if _, present := m["WorkGroup"]; present {
 		t.Fatal("empty WorkGroup should be omitted")
 	}
-	if _, present := m["ClientRequestToken"]; present {
-		t.Fatal("empty ClientRequestToken should be omitted")
+	// Athena rejects a null/empty ClientRequestToken, so when the caller
+	// omits one the builder must synthesize a deterministic non-empty token.
+	token, ok := m["ClientRequestToken"].(string)
+	if !ok || token == "" {
+		t.Fatalf("ClientRequestToken should be synthesized when absent, got %v", m["ClientRequestToken"])
 	}
+	if len(token) != 64 {
+		t.Fatalf("synthesized ClientRequestToken should be 64 hex chars, got %d: %q", len(token), token)
+	}
+	if !isHex(token) {
+		t.Fatalf("synthesized ClientRequestToken should be hex, got %q", token)
+	}
+
+	// The token is deterministic: an identical request yields the same token.
+	b2, err := buildStartQueryExecution(map[string]any{"query_string": "SELECT 1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := unmarshalBody(t, b2)["ClientRequestToken"]; got != token {
+		t.Fatalf("token not deterministic: %v != %v", got, token)
+	}
+
+	// A different request (different SQL) yields a different token, so the
+	// token is a true function of the request and avoids collisions.
+	b3, err := buildStartQueryExecution(map[string]any{"query_string": "SELECT 2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := unmarshalBody(t, b3)["ClientRequestToken"]; got == token {
+		t.Fatalf("distinct requests collided on token %v", got)
+	}
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func TestValidateReadOnlySQL(t *testing.T) {

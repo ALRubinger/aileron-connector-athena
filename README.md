@@ -194,10 +194,10 @@ runtimes](#synchronous-run_query-for-deterministic-runtimes)).
 
 | Op | `X-Amz-Target` | Effect | Idempotency |
 |---|---|---|---|
-| `start_query_execution` | `AmazonAthena.StartQueryExecution` | read | not idempotent |
+| `start_query_execution` | `AmazonAthena.StartQueryExecution` | read | idempotent |
 | `get_query_execution` | `AmazonAthena.GetQueryExecution` | read | idempotent |
 | `get_query_results` | `AmazonAthena.GetQueryResults` | read | idempotent |
-| `run_query` | `StartQueryExecution` → `GetQueryExecution` → `GetQueryResults` | read | not idempotent |
+| `run_query` | `StartQueryExecution` → `GetQueryExecution` → `GetQueryResults` | read | idempotent |
 | `stop_query_execution` | `AmazonAthena.StopQueryExecution` | write (gated) | idempotent |
 | `list_query_executions` | `AmazonAthena.ListQueryExecutions` | read | idempotent |
 | `batch_get_query_execution` | `AmazonAthena.BatchGetQueryExecution` | read | idempotent |
@@ -210,13 +210,22 @@ runtimes](#synchronous-run_query-for-deterministic-runtimes)).
 | `list_data_catalogs` | `AmazonAthena.ListDataCatalogs` | read | idempotent |
 | `get_data_catalog` | `AmazonAthena.GetDataCatalog` | read | idempotent |
 
-`start_query_execution` declares `idempotent = false` because each call
-submits a fresh execution and returns a new `QueryExecutionId`. The
-read ops are idempotent because re-issuing them returns the same view
-without side effects. `stop_query_execution` is `idempotent = true`
-because stopping an already-stopped execution is a no-op against the
-same id. `run_query` declares `idempotent = false` for the same reason as
-`start_query_execution`: it submits a fresh execution each call.
+`start_query_execution` declares `idempotent = true`: when the caller
+omits `client_request_token`, the connector synthesizes a deterministic
+token — the hex-encoded SHA-256 of the canonical request (query string
+plus any execution context, result configuration, and work group) — so
+two identical calls carry the same token and Athena collapses them onto a
+single execution instead of starting a new one. (Athena requires a
+non-null/non-empty token, and this connector hand-builds the request with
+no AWS SDK to auto-generate one; the synthesized token also fixes the
+out-of-the-box 400 INVALID_INPUT "clientRequestToken is null or empty"
+failure.) The read ops are idempotent because re-issuing them returns the
+same view without side effects. `stop_query_execution` is
+`idempotent = true` because stopping an already-stopped execution is a
+no-op against the same id. `run_query` declares `idempotent = true` for
+the same reason as `start_query_execution`: it derives the same
+deterministic token from an identical request, so a replay resolves to
+the same execution rather than spawning a duplicate.
 
 ## Async start, poll, results flow
 
