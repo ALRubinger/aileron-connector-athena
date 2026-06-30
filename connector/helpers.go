@@ -225,6 +225,20 @@ func buildAthenaTarget(action string) string {
 //	                                  INVALID_INPUT. The 64-char hex token is
 //	                                  within Athena's 32-128 length bound and
 //	                                  valid charset.
+//	IdempotencySalt       (string) — an opaque caller-supplied salt that,
+//	                                  when no explicit ClientRequestToken is
+//	                                  given, is folded into the deterministic
+//	                                  token's canonical hash so the same
+//	                                  logical request with a different salt
+//	                                  yields a fresh, still-deterministic
+//	                                  token. The salt is NOT emitted as a
+//	                                  StartQueryExecution body member (it is
+//	                                  not a valid Athena field) — it only
+//	                                  influences the hash input. When absent
+//	                                  the body is byte-identical to today's.
+//	                                  An explicit ClientRequestToken is still
+//	                                  honored verbatim and the salt is ignored
+//	                                  for derivation.
 //
 // The SQL read-only gate (validateReadOnlySQL) is applied here, after the
 // QueryString is confirmed present and before any host/Athena call: a
@@ -265,15 +279,21 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 		payload["ExecutionParameters"] = params
 	}
 	if token, ok := args["client_request_token"].(string); ok && token != "" {
-		// Caller-supplied token is honored verbatim.
+		// Caller-supplied token is honored verbatim. The idempotency_salt
+		// is ignored in this branch — an explicit token fully controls
+		// idempotency, so the salt would be meaningless.
 		payload["ClientRequestToken"] = token
 	} else {
 		// Athena rejects a null/empty ClientRequestToken with 400
 		// INVALID_INPUT, and this connector has no AWS SDK to
 		// auto-generate one. Synthesize a deterministic token that is a
 		// pure function of the canonical request so the same request
-		// always idempotently maps to the same token.
-		payload["ClientRequestToken"] = deriveClientRequestToken(payload)
+		// always idempotently maps to the same token. An optional
+		// idempotency_salt is folded into the hash input (never emitted as
+		// a body member) so the same logical request with a different salt
+		// gets a fresh deterministic token. Absent salt → today's bytes.
+		salt, _ := optionalString(args, "idempotency_salt")
+		payload["ClientRequestToken"] = deriveClientRequestToken(payload, salt)
 	}
 
 	return json.Marshal(payload)
@@ -289,7 +309,14 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 // collide on a single token. The result is 64 hex characters, within Athena's
 // 32-128 length bound and valid charset, and uses no clock or randomness so it
 // is reproducible on the wasip1 target.
-func deriveClientRequestToken(payload map[string]any) string {
+//
+// An optional salt (the caller's idempotency_salt) is folded into the hash
+// input — never emitted as a body member — so the same logical request with a
+// different salt yields a fresh deterministic token, letting a caller force a
+// distinct execution for an otherwise-identical request. When salt is empty the
+// hash input is the canonical payload alone, so the token is byte-identical to
+// the no-salt behavior: existing callers are unaffected.
+func deriveClientRequestToken(payload map[string]any, salt string) string {
 	// json.Marshal of a map emits keys in sorted order, giving a stable
 	// canonical encoding without a separate normalization pass.
 	canonical, err := json.Marshal(payload)
@@ -298,8 +325,45 @@ func deriveClientRequestToken(payload map[string]any) string {
 		// this is unreachable; fall back to the query string alone.
 		canonical = []byte(fmt.Sprintf("%v", payload["QueryString"]))
 	}
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:])
+	h := sha256.New()
+	h.Write(canonical)
+	if salt != "" {
+		// Domain-separate the salt from the canonical request with a NUL
+		// byte so no salt value can reproduce a no-salt or different-salt
+		// hash input by colliding on the byte boundary.
+		h.Write([]byte{0})
+		h.Write([]byte(salt))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// startQueryExecutionErrorMessage maps a non-2xx StartQueryExecution reply to
+// the external_api_error message text. It is scoped to StartQueryExecution: the
+// caller invokes it only on that target's non-2xx path, so the
+// IDEMPOTENT_PARAMETER_MISMATCH detection cannot mis-fire on any of the other
+// 13 Athena ops.
+//
+// When the body carries Athena's IDEMPOTENT_PARAMETER_MISMATCH error code (a
+// 400 returned when a ClientRequestToken is reused with different request
+// parameters), the raw passthrough is replaced with a connector message that
+// names the code, explains it is a deterministic-token collision with a prior
+// execution that used the same logical request but different parameters (for
+// example a work-group result location that changed since the first run), and
+// points the caller at the idempotency_salt input (or an explicit
+// client_request_token) to force a fresh token. The classification stays
+// external_api_error — this is still Athena rejecting the request, just with a
+// connector-authored explanation instead of the opaque AWS body. Every other
+// non-2xx falls through to the verbatim "Athena API returned <status>: <body>"
+// passthrough.
+func startQueryExecutionErrorMessage(status int, respBody []byte) string {
+	body := string(respBody)
+	if strings.Contains(body, "IDEMPOTENT_PARAMETER_MISMATCH") {
+		return fmt.Sprintf(
+			"Athena API returned %d IDEMPOTENT_PARAMETER_MISMATCH: the connector's deterministic idempotency token collided with a prior StartQueryExecution that used the same logical request but different parameters (for example a changed work-group result location). To force a fresh execution, pass a distinct idempotency_salt input (folded into the derived token) or supply your own client_request_token. Raw Athena response: %s",
+			status, body,
+		)
+	}
+	return fmt.Sprintf("Athena API returned %d: %s", status, body)
 }
 
 // buildGetQueryExecution constructs the AWS-JSON-1.1 body for Athena's

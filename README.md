@@ -227,6 +227,22 @@ the same reason as `start_query_execution`: it derives the same
 deterministic token from an identical request, so a replay resolves to
 the same execution rather than spawning a duplicate.
 
+A caller that needs a *fresh* execution for an otherwise-identical request
+can pass an optional `idempotency_salt`. When no explicit
+`client_request_token` is supplied, the salt is folded into the derived
+token's hash so the same logical query with a different salt yields a
+distinct token and a distinct execution. The salt only influences the
+derived token — it is never sent to Athena as a request field, and an
+absent salt leaves the derivation byte-for-byte unchanged. An explicit
+`client_request_token` still wins and the salt is ignored. If a replay
+reuses the derived token with different parameters (for example a
+work-group result location that changed between runs), Athena returns a
+400 `IDEMPOTENT_PARAMETER_MISMATCH`; the connector surfaces this as an
+`external_api_error` that names the code and points the caller at
+`idempotency_salt` or `client_request_token` to mint a fresh token. None
+of this touches the ADR-0010 `idempotent = true` declarations: the default
+behavior is unchanged.
+
 ## Async start, poll, results flow
 
 Athena query execution is asynchronous. The pattern is start, poll, then
@@ -267,7 +283,8 @@ caller. It internalizes the whole lifecycle in one synchronous op:
 
 The response is `{QueryExecutionId, ResultSet}`. `run_query` takes the
 same `region` / `query_string` / `query_execution_context` /
-`result_configuration` / `work_group` / `client_request_token` inputs as
+`result_configuration` / `work_group` / `client_request_token` /
+`idempotency_salt` / `execution_parameters` inputs as
 `start_query_execution`, plus the optional `timeout_seconds`. It is
 additive: the three async ops stay as-is for the agentic flow. It adds no
 new network host or credential — every internal call goes through the same

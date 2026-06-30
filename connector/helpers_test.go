@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -307,6 +308,110 @@ func TestBuildStartQueryExecution_ExecutionParameters(t *testing.T) {
 			"execution_parameters": []any{"1"},
 		}); err == nil {
 			t.Fatal("non-read statement should fail the gate even with parameters")
+		}
+	})
+}
+
+func TestBuildStartQueryExecution_IdempotencySalt(t *testing.T) {
+	tokenOf := func(t *testing.T, args map[string]any) string {
+		t.Helper()
+		b, err := buildStartQueryExecution(args)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		m := unmarshalBody(t, b)
+		// The salt must never leak into the StartQueryExecution body — it is
+		// not a valid Athena member, so it must not be emitted under any key.
+		if _, present := m["IdempotencySalt"]; present {
+			t.Fatal("salt leaked into the request body as IdempotencySalt")
+		}
+		if _, present := m["idempotency_salt"]; present {
+			t.Fatal("salt leaked into the request body as idempotency_salt")
+		}
+		tok, ok := m["ClientRequestToken"].(string)
+		if !ok || tok == "" {
+			t.Fatalf("missing synthesized ClientRequestToken: %v", m["ClientRequestToken"])
+		}
+		return tok
+	}
+
+	t.Run("present salt yields a distinct deterministic token", func(t *testing.T) {
+		base := map[string]any{"query_string": "SELECT 1"}
+		withSalt := map[string]any{"query_string": "SELECT 1", "idempotency_salt": "retry-2"}
+
+		noSalt := tokenOf(t, base)
+		salted := tokenOf(t, withSalt)
+		if salted == noSalt {
+			t.Fatalf("salt did not change the token (both %s)", salted)
+		}
+		// A different salt yields a different token again.
+		salted2 := tokenOf(t, map[string]any{"query_string": "SELECT 1", "idempotency_salt": "retry-3"})
+		if salted2 == salted || salted2 == noSalt {
+			t.Fatalf("distinct salts collided (s1=%s s2=%s noSalt=%s)", salted, salted2, noSalt)
+		}
+		// The salted token stays deterministic across calls.
+		if again := tokenOf(t, withSalt); again != salted {
+			t.Fatalf("salted token not deterministic: %s != %s", again, salted)
+		}
+	})
+
+	t.Run("absent salt leaves the token byte-identical to today", func(t *testing.T) {
+		// An absent salt and an explicitly-empty salt must both reproduce the
+		// no-salt derivation exactly (no regression of #41/#42).
+		want := tokenOf(t, map[string]any{"query_string": "SELECT 1"})
+		if got := tokenOf(t, map[string]any{"query_string": "SELECT 1", "idempotency_salt": ""}); got != want {
+			t.Fatalf("empty salt changed the token: %s != %s", got, want)
+		}
+	})
+
+	t.Run("explicit client_request_token ignores the salt", func(t *testing.T) {
+		// An explicit token is honored verbatim regardless of any salt, so two
+		// requests differing only in salt resolve to the same caller token.
+		a := tokenOf(t, map[string]any{
+			"query_string":         "SELECT 1",
+			"client_request_token": "caller-token-xyz",
+			"idempotency_salt":     "retry-2",
+		})
+		b := tokenOf(t, map[string]any{
+			"query_string":         "SELECT 1",
+			"client_request_token": "caller-token-xyz",
+			"idempotency_salt":     "retry-9",
+		})
+		if a != "caller-token-xyz" || b != "caller-token-xyz" {
+			t.Fatalf("explicit token not honored verbatim: a=%s b=%s", a, b)
+		}
+	})
+}
+
+func TestStartQueryExecutionErrorMessage(t *testing.T) {
+	t.Run("rewrites IDEMPOTENT_PARAMETER_MISMATCH", func(t *testing.T) {
+		body := []byte(`{"__type":"InvalidRequestException","AthenaErrorCode":"IDEMPOTENT_PARAMETER_MISMATCH","Message":"Idempotent parameters do not match"}`)
+		msg := startQueryExecutionErrorMessage(400, body)
+		if !strings.Contains(msg, "IDEMPOTENT_PARAMETER_MISMATCH") {
+			t.Fatalf("message should name the code: %q", msg)
+		}
+		if !strings.Contains(msg, "idempotency_salt") || !strings.Contains(msg, "client_request_token") {
+			t.Fatalf("message should point at recovery inputs: %q", msg)
+		}
+		if !strings.Contains(msg, "400") {
+			t.Fatalf("message should carry the status: %q", msg)
+		}
+		// The raw Athena body is preserved for debugging.
+		if !strings.Contains(msg, "Idempotent parameters do not match") {
+			t.Fatalf("message should preserve the raw body: %q", msg)
+		}
+	})
+
+	t.Run("passes other errors through verbatim", func(t *testing.T) {
+		body := []byte(`{"__type":"InvalidRequestException","Message":"line 1:1: mismatched input"}`)
+		msg := startQueryExecutionErrorMessage(400, body)
+		want := "Athena API returned 400: " + string(body)
+		if msg != want {
+			t.Fatalf("non-mismatch error not passed through verbatim:\n got %q\nwant %q", msg, want)
+		}
+		// And it must not mention the mismatch code or recovery inputs.
+		if strings.Contains(msg, "IDEMPOTENT_PARAMETER_MISMATCH") || strings.Contains(msg, "idempotency_salt") {
+			t.Fatalf("verbatim path mis-fired the mismatch rewrite: %q", msg)
 		}
 	})
 }
