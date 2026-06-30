@@ -101,6 +101,30 @@ func requireStringSlice(args map[string]any, key string) ([]string, error) {
 	return out, nil
 }
 
+// optionalStringSlice reads an optional array-of-strings arg (e.g.
+// StartQueryExecution's ExecutionParameters). It mirrors requireStringSlice's
+// per-element contract — each present element must be a non-empty string,
+// matching Athena's min-length-1 parameter constraint — but the field itself
+// is optional: an absent key, a non-array value, or an empty array yields
+// (nil, nil) so the caller simply omits the member. A present, non-empty array
+// containing a non-string or empty-string element is an error, surfaced before
+// any host/Athena call.
+func optionalStringSlice(args map[string]any, key string) ([]string, error) {
+	raw, ok := args[key].([]any)
+	if !ok || len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(raw))
+	for i, el := range raw {
+		s, ok := el.(string)
+		if !ok || s == "" {
+			return nil, fmt.Errorf("%s[%d] must be a non-empty string", key, i)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 // applyPaging conditionally sets the standard Athena paging members on a
 // request payload from args: MaxResults (a numeric arg) and NextToken (an
 // optional non-empty string). It centralizes the paging contract shared by
@@ -173,6 +197,15 @@ func buildAthenaTarget(action string) string {
 //	QueryExecutionContext (object) — {Database, Catalog}.
 //	ResultConfiguration   (object) — {OutputLocation, ...}.
 //	WorkGroup             (string).
+//	ExecutionParameters   ([]string) — values bound to the query's "?"
+//	                                  placeholders, in order, for a
+//	                                  parameterized (prepared) statement.
+//	                                  Included only when present and
+//	                                  non-empty; each member must be a
+//	                                  non-empty string (Athena's min-length-1
+//	                                  parameter constraint). The read-only
+//	                                  gate is unaffected — these are bound
+//	                                  values, not SQL text.
 //	ClientRequestToken    (string) — idempotency token. A caller-supplied
 //	                                  non-empty token is honored verbatim.
 //	                                  When absent or empty, a deterministic
@@ -180,9 +213,12 @@ func buildAthenaTarget(action string) string {
 //	                                  hex-encoded SHA-256 of the canonical
 //	                                  request (query string plus the
 //	                                  execution context, result
-//	                                  configuration and work group), so the
-//	                                  same request always yields the same
-//	                                  token. This is required because this
+//	                                  configuration, work group and execution
+//	                                  parameters), so the same request always
+//	                                  yields the same token — and a request
+//	                                  differing only in its bound parameters
+//	                                  yields a distinct token. This is
+//	                                  required because this
 //	                                  connector hand-builds the AWS-JSON-1.1
 //	                                  body with no AWS SDK and Athena rejects
 //	                                  a null/empty token with 400
@@ -216,6 +252,18 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 	if wg, ok := args["work_group"].(string); ok && wg != "" {
 		payload["WorkGroup"] = wg
 	}
+	// ExecutionParameters is set before the ClientRequestToken branch so it
+	// folds into deriveClientRequestToken's canonical hash: two requests with
+	// the same SQL but different bound parameter values get distinct
+	// synthesized idempotency tokens and so are not collapsed onto one
+	// execution.
+	params, err := optionalStringSlice(args, "execution_parameters")
+	if err != nil {
+		return nil, err
+	}
+	if params != nil {
+		payload["ExecutionParameters"] = params
+	}
 	if token, ok := args["client_request_token"].(string); ok && token != "" {
 		// Caller-supplied token is honored verbatim.
 		payload["ClientRequestToken"] = token
@@ -234,9 +282,10 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 // deriveClientRequestToken returns a deterministic idempotency token for a
 // StartQueryExecution request: the hex-encoded SHA-256 of the canonical JSON
 // of the request fields that define it (QueryString plus any
-// QueryExecutionContext, ResultConfiguration and WorkGroup). Hashing the full
-// canonical request — not just the SQL — makes the token a true function of
-// the request, so the same SQL targeting a different output location does not
+// QueryExecutionContext, ResultConfiguration, WorkGroup and
+// ExecutionParameters). Hashing the full canonical request — not just the SQL
+// — makes the token a true function of the request, so the same SQL targeting a
+// different output location, or bound to different parameter values, does not
 // collide on a single token. The result is 64 hex characters, within Athena's
 // 32-128 length bound and valid charset, and uses no clock or randomness so it
 // is reproducible on the wasip1 target.

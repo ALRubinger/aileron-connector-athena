@@ -64,6 +64,13 @@ name = "client_request_token"
 type = "string"
 description = "Optional caller-supplied idempotency token. Athena treats two StartQueryExecution calls carrying the same token as the same request. A non-empty token supplied here is honored verbatim. When omitted, the connector synthesizes a deterministic token — the hex-encoded SHA-256 of the canonical request (query string plus execution context, result configuration, and work group) — so the same request always maps to the same token. (Athena requires a non-null/non-empty token, and this connector hand-builds the request with no AWS SDK to auto-generate one.) Because the token is a deterministic function of the request, this action is declared idempotent = true at the manifest level per ADR-0010."
 required = false
+
+[[inputs]]
+name = "execution_parameters"
+type = "array"
+items_type = "string"
+description = "Optional ordered list of string values bound to the query's \"?\" placeholders, for a parameterized (prepared) statement, for example [\"14\", \"2026-06-29\"] for `WHERE created >= date_add('day', -?, ?)`. Emitted as Athena's ExecutionParameters field only when present and non-empty; each member must be a non-empty string (Athena's min-length-1 parameter constraint). The read-only SQL gate is unaffected — these are bound values, not SQL text. Bound parameters fold into the synthesized client_request_token, so the same SQL bound to different values yields distinct idempotency tokens and distinct executions."
+required = false
 +++
 
 # Run an Athena SQL Query
