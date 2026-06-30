@@ -197,6 +197,160 @@ func TestBuildStartQueryExecution_EmptyOptionalsOmitted(t *testing.T) {
 	}
 }
 
+func TestBuildStartQueryExecution_ExecutionParameters(t *testing.T) {
+	t.Run("emitted when present", func(t *testing.T) {
+		b, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT * FROM t WHERE created >= date_add('day', -?, ?)",
+			"execution_parameters": []any{"14", "2026-06-29"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		m := unmarshalBody(t, b)
+		got, ok := m["ExecutionParameters"].([]any)
+		if !ok {
+			t.Fatalf("ExecutionParameters not emitted: %v", m["ExecutionParameters"])
+		}
+		if len(got) != 2 || got[0] != "14" || got[1] != "2026-06-29" {
+			t.Fatalf("ExecutionParameters = %v, want [14 2026-06-29]", got)
+		}
+	})
+
+	t.Run("omitted when absent", func(t *testing.T) {
+		b, err := buildStartQueryExecution(map[string]any{"query_string": "SELECT 1"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, present := unmarshalBody(t, b)["ExecutionParameters"]; present {
+			t.Fatal("absent execution_parameters should be omitted")
+		}
+	})
+
+	t.Run("omitted when empty", func(t *testing.T) {
+		b, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT 1",
+			"execution_parameters": []any{},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, present := unmarshalBody(t, b)["ExecutionParameters"]; present {
+			t.Fatal("empty execution_parameters should be omitted")
+		}
+	})
+
+	t.Run("rejects empty-string member", func(t *testing.T) {
+		if _, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT 1",
+			"execution_parameters": []any{"ok", ""},
+		}); err == nil {
+			t.Fatal("expected error for empty-string parameter member")
+		}
+	})
+
+	t.Run("rejects non-string member", func(t *testing.T) {
+		if _, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT 1",
+			"execution_parameters": []any{"ok", 42},
+		}); err == nil {
+			t.Fatal("expected error for non-string parameter member")
+		}
+	})
+
+	t.Run("parameters alter the synthesized token", func(t *testing.T) {
+		// Same SQL, no caller token: bound parameters must fold into the
+		// canonical hash so differing values yield distinct idempotency tokens.
+		base := map[string]any{"query_string": "SELECT * FROM t WHERE id = ?"}
+		b0, err := buildStartQueryExecution(base)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tokNoParams := unmarshalBody(t, b0)["ClientRequestToken"]
+
+		b1, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT * FROM t WHERE id = ?",
+			"execution_parameters": []any{"1"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tok1 := unmarshalBody(t, b1)["ClientRequestToken"]
+
+		b2, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT * FROM t WHERE id = ?",
+			"execution_parameters": []any{"2"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tok2 := unmarshalBody(t, b2)["ClientRequestToken"]
+
+		if tok1 == tok2 {
+			t.Fatalf("differing bound parameters collided on token %v", tok1)
+		}
+		if tok1 == tokNoParams || tok2 == tokNoParams {
+			t.Fatalf("bound parameters did not alter the token (no-params=%v p1=%v p2=%v)", tokNoParams, tok1, tok2)
+		}
+	})
+
+	t.Run("read-only gate still applies with parameters", func(t *testing.T) {
+		// Parameters are values, not SQL: a parameterized read query passes,
+		// and a non-read statement is still rejected regardless of parameters.
+		if _, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "SELECT * FROM t WHERE id = ?",
+			"execution_parameters": []any{"1"},
+		}); err != nil {
+			t.Fatalf("parameterized read query should pass the gate: %v", err)
+		}
+		if _, err := buildStartQueryExecution(map[string]any{
+			"query_string":         "DELETE FROM t WHERE id = ?",
+			"execution_parameters": []any{"1"},
+		}); err == nil {
+			t.Fatal("non-read statement should fail the gate even with parameters")
+		}
+	})
+}
+
+func TestOptionalStringSlice(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		got, err := optionalStringSlice(map[string]any{"p": []any{"a", "b"}}, "p")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+			t.Fatalf("got %v, want [a b]", got)
+		}
+	})
+	t.Run("absent yields nil,nil", func(t *testing.T) {
+		got, err := optionalStringSlice(map[string]any{}, "p")
+		if err != nil || got != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+	t.Run("empty array yields nil,nil", func(t *testing.T) {
+		got, err := optionalStringSlice(map[string]any{"p": []any{}}, "p")
+		if err != nil || got != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+	t.Run("non-array yields nil,nil", func(t *testing.T) {
+		got, err := optionalStringSlice(map[string]any{"p": "a"}, "p")
+		if err != nil || got != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+	t.Run("empty-string member errors", func(t *testing.T) {
+		if _, err := optionalStringSlice(map[string]any{"p": []any{"a", ""}}, "p"); err == nil {
+			t.Fatal("expected error for empty-string member")
+		}
+	})
+	t.Run("non-string member errors", func(t *testing.T) {
+		if _, err := optionalStringSlice(map[string]any{"p": []any{"a", 42}}, "p"); err == nil {
+			t.Fatal("expected error for non-string member")
+		}
+	})
+}
+
 func isHex(s string) bool {
 	for _, c := range s {
 		switch {

@@ -66,6 +66,13 @@ description = "Optional caller-supplied idempotency token. Athena treats two Sta
 required = false
 
 [[inputs]]
+name = "execution_parameters"
+type = "array"
+items_type = "string"
+description = "Optional ordered list of string values bound to the query's \"?\" placeholders, for a parameterized (prepared) statement, for example [\"14\", \"2026-06-29\"] for `WHERE created >= date_add('day', -?, ?)`. Emitted as Athena's ExecutionParameters field only when present and non-empty; each member must be a non-empty string (Athena's min-length-1 parameter constraint). The read-only SQL gate is unaffected — these are bound values, not SQL text. Bound parameters fold into the synthesized client_request_token, so the same SQL bound to different values yields distinct idempotency tokens and distinct executions."
+required = false
+
+[[inputs]]
 name = "timeout_seconds"
 type = "integer"
 description = "Optional overall budget, in seconds, for the wait loop to drive the query to a terminal state. Defaults to 180 (three minutes), mirroring the connector's live round-trip test ceiling. A query still QUEUED or RUNNING when the budget is spent fails with a connector_runtime_error rather than hanging. A non-positive or non-numeric value falls back to the default."
