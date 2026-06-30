@@ -15,6 +15,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -171,8 +173,22 @@ func buildAthenaTarget(action string) string {
 //	QueryExecutionContext (object) — {Database, Catalog}.
 //	ResultConfiguration   (object) — {OutputLocation, ...}.
 //	WorkGroup             (string).
-//	ClientRequestToken    (string) — idempotency token; passthrough-only,
-//	                                  never derived or synthesized here.
+//	ClientRequestToken    (string) — idempotency token. A caller-supplied
+//	                                  non-empty token is honored verbatim.
+//	                                  When absent or empty, a deterministic
+//	                                  token is synthesized here as the
+//	                                  hex-encoded SHA-256 of the canonical
+//	                                  request (query string plus the
+//	                                  execution context, result
+//	                                  configuration and work group), so the
+//	                                  same request always yields the same
+//	                                  token. This is required because this
+//	                                  connector hand-builds the AWS-JSON-1.1
+//	                                  body with no AWS SDK and Athena rejects
+//	                                  a null/empty token with 400
+//	                                  INVALID_INPUT. The 64-char hex token is
+//	                                  within Athena's 32-128 length bound and
+//	                                  valid charset.
 //
 // The SQL read-only gate (validateReadOnlySQL) is applied here, after the
 // QueryString is confirmed present and before any host/Athena call: a
@@ -201,10 +217,40 @@ func buildStartQueryExecution(args map[string]any) ([]byte, error) {
 		payload["WorkGroup"] = wg
 	}
 	if token, ok := args["client_request_token"].(string); ok && token != "" {
+		// Caller-supplied token is honored verbatim.
 		payload["ClientRequestToken"] = token
+	} else {
+		// Athena rejects a null/empty ClientRequestToken with 400
+		// INVALID_INPUT, and this connector has no AWS SDK to
+		// auto-generate one. Synthesize a deterministic token that is a
+		// pure function of the canonical request so the same request
+		// always idempotently maps to the same token.
+		payload["ClientRequestToken"] = deriveClientRequestToken(payload)
 	}
 
 	return json.Marshal(payload)
+}
+
+// deriveClientRequestToken returns a deterministic idempotency token for a
+// StartQueryExecution request: the hex-encoded SHA-256 of the canonical JSON
+// of the request fields that define it (QueryString plus any
+// QueryExecutionContext, ResultConfiguration and WorkGroup). Hashing the full
+// canonical request — not just the SQL — makes the token a true function of
+// the request, so the same SQL targeting a different output location does not
+// collide on a single token. The result is 64 hex characters, within Athena's
+// 32-128 length bound and valid charset, and uses no clock or randomness so it
+// is reproducible on the wasip1 target.
+func deriveClientRequestToken(payload map[string]any) string {
+	// json.Marshal of a map emits keys in sorted order, giving a stable
+	// canonical encoding without a separate normalization pass.
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		// payload holds only JSON-marshalable values assembled above, so
+		// this is unreachable; fall back to the query string alone.
+		canonical = []byte(fmt.Sprintf("%v", payload["QueryString"]))
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 // buildGetQueryExecution constructs the AWS-JSON-1.1 body for Athena's

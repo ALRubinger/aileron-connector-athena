@@ -26,7 +26,7 @@ intent = "run an Athena SQL query"
 id = "start"
 connector = "github://ALRubinger/aileron-connector-athena"
 op = "start_query_execution"
-idempotent = false
+idempotent = true
 
 [[inputs]]
 name = "region"
@@ -62,7 +62,7 @@ required = false
 [[inputs]]
 name = "client_request_token"
 type = "string"
-description = "Optional caller-supplied idempotency token. Athena treats two StartQueryExecution calls carrying the same token as the same request. This token is passthrough only and the connector never derives or synthesizes it. Because the caller owns idempotency here, this action is declared idempotent = false at the manifest level."
+description = "Optional caller-supplied idempotency token. Athena treats two StartQueryExecution calls carrying the same token as the same request. A non-empty token supplied here is honored verbatim. When omitted, the connector synthesizes a deterministic token — the hex-encoded SHA-256 of the canonical request (query string plus execution context, result configuration, and work group) — so the same request always maps to the same token. (Athena requires a non-null/non-empty token, and this connector hand-builds the request with no AWS SDK to auto-generate one.) Because the token is a deterministic function of the request, this action is declared idempotent = true at the manifest level per ADR-0010."
 required = false
 +++
 
@@ -96,10 +96,17 @@ defense-in-depth layer. The primary guarantee is the read-only IAM
 principal the host signs requests as, which cannot perform writes or
 DDL regardless of the SQL submitted.
 
-This action is declared `idempotent = false`. Athena's own idempotency
-is caller-driven through the optional `client_request_token`. Two calls
-without a shared token start two separate query executions, so the
-manifest leaves idempotency to the caller rather than asserting it.
+This action is declared `idempotent = true` per ADR-0010. When the
+caller omits `client_request_token`, the connector synthesizes a
+deterministic token — the hex-encoded SHA-256 of the canonical request
+(query string plus any execution context, result configuration, and work
+group). Because the token is a pure function of the request, two
+identical calls carry the same token and Athena collapses them onto a
+single query execution rather than starting a second one. A caller that
+wants distinct executions for an identical request can vary the request
+or supply its own `client_request_token`. Replaying the same request
+therefore does not spawn duplicate work, which is what makes the action
+safe to declare idempotent.
 
 The connector runs in the Aileron WASM sandbox with
 `[capabilities.network]` allow-listing the regional Athena hosts. Each
