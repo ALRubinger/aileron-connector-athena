@@ -250,14 +250,19 @@ re-launch returns that same frozen failure (identical `QueryExecutionId`),
 so a transient error that has since been fixed would never re-run — the
 only escape being a hand-passed `idempotency_salt`. `run_query` removes
 that trap by self-healing on the deterministic-token path (no
-`client_request_token`, no `idempotency_salt`): when it polls a terminal
-`FAILED`/`CANCELLED` execution whose `SubmissionDateTime` predates the
-current call — proof Athena replayed a pre-existing execution rather than
-one this call started — it re-issues `StartQueryExecution` **once** with a
-fresh time-nonce token and polls the new execution. A genuinely fresh
-failure (submitted at or after the call started) is returned as-is, so
-real failures are never double-executed and the single re-issue rules out
-an infinite loop. Net effect: a successful re-launch returns the same
+`client_request_token`, no `idempotency_salt`) with a clock-free
+discriminator: when the **first** `GetQueryExecution` poll already shows a
+terminal `FAILED`/`CANCELLED` state — proof Athena replayed a pre-existing
+execution, since a query this call actually started is never
+already-terminal on the first poll — it re-issues `StartQueryExecution`
+**once** with a fresh token salted from the stale `QueryExecutionId` and
+polls the new execution. (The connector runs in the Aileron wasip1 sandbox
+with a frozen fake wall clock, so it cannot date `SubmissionDateTime`
+against the current time or mint a `UnixNano` nonce; poll ordinality and
+the returned `QueryExecutionId` are the clock-free substitutes.) A
+genuinely fresh failure — which necessarily runs past the first poll — is
+returned as-is, so real failures are never double-executed and the single
+re-issue rules out an infinite loop. Net effect: a successful re-launch returns the same
 result with no salt (unchanged); a re-launch after a since-fixed failure
 re-executes automatically with no salt (fixed); and `idempotency_salt`
 stays as the explicit override to force a fresh execution of an
