@@ -362,25 +362,27 @@ func runQuery(args map[string]any) {
 	// replays whatever execution the synthesized token first produced —
 	// including a terminal FAILED/CANCELLED one — so a bare re-launch after a
 	// since-fixed transient failure would return the frozen failure forever.
-	// When the terminal-failed execution's SubmissionDateTime predates this
-	// call (proving it is a replay, not a query this call started), re-issue
-	// ONCE with a fresh time-nonce token and poll the new execution. A
-	// genuinely fresh failure is returned as-is (not double-executed), and the
-	// single-shot bound means no infinite loop. The async start_query_execution
-	// op cannot observe the outcome within one call and so keeps the plain
-	// deterministic token; idempotency_salt remains the explicit override to
-	// force a fresh execution of an otherwise-identical SUCCEEDED request.
+	// The discriminator is clock-free: this connector runs in the wasip1
+	// sandbox instantiated without WithSysWalltime, so time.Now() is a frozen
+	// fake walltime (~2022) and any absolute-timestamp comparison against a real
+	// 2026 SubmissionDateTime is a no-op. Instead, key on poll ordinality: a
+	// query this call actually started is never already terminal on the FIRST
+	// GetQueryExecution poll, so a first-poll terminal FAILED/CANCELLED can only
+	// be Athena replaying a frozen prior execution. In that case re-issue ONCE
+	// with a fresh token salted from the stale QueryExecutionId (a clock-free
+	// value) and poll the new execution. A genuinely fresh failure — which
+	// necessarily runs past the first poll — is returned as-is (not
+	// double-executed), and the single-shot bound means no infinite loop. The
+	// async start_query_execution op cannot observe the outcome within one call
+	// and so keeps the plain deterministic token; idempotency_salt remains the
+	// explicit override to force a fresh execution of an otherwise-identical
+	// SUCCEEDED request.
 	selfHeal := usesDeterministicToken(args)
 	timeoutSeconds := resolveTimeoutSeconds(args)
 
 	startArgs := args
 	retried := false
 	for {
-		// callStart bounds the stale-replay discriminator: a failed execution
-		// submitted before this instant (minus a skew margin) is one Athena
-		// replayed, not one this StartQueryExecution actually launched.
-		callStart := time.Now()
-
 		// Build + start. buildStartQueryExecution applies the read-only gate
 		// before any host call, so a non-read QueryString fails here.
 		startBody, err := buildStartQueryExecution(startArgs)
@@ -419,6 +421,7 @@ func runQuery(args map[string]any) {
 		}
 		deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 		reissue := false
+		firstPoll := true
 		for {
 			execResp, status, err := doSignedAthena(region, "GetQueryExecution", getExecBody)
 			if err != nil {
@@ -441,13 +444,14 @@ func runQuery(args map[string]any) {
 				return
 			case queryStateFailed, queryStateCancelled:
 				// Self-heal only on the deterministic-token path, only once,
-				// and only when SubmissionDateTime proves a stale replay. A
-				// still-RUNNING replay is not handled here — it stays in the
-				// poll loop below, so a legitimate concurrent in-flight dedup
-				// is polled to completion rather than re-issued.
-				submission, hasSubmission := queryExecutionSubmissionEpoch(parsed)
-				if selfHeal && !retried && hasSubmission &&
-					isStaleReplay(submission, callStart, runQueryReplaySkew) {
+				// and only when this FIRST poll already shows a terminal state
+				// — the clock-free proof that Athena replayed a frozen failure
+				// rather than one this call launched (a query this call started
+				// is never already terminal on the first poll). A still-RUNNING
+				// replay is not handled here — it stays in the poll loop below,
+				// so a legitimate concurrent in-flight dedup is polled to
+				// completion rather than re-issued.
+				if shouldReissueStaleReplay(selfHeal, retried, firstPoll) {
 					reissue = true
 					break
 				}
@@ -460,6 +464,7 @@ func runQuery(args map[string]any) {
 			if reissue {
 				break
 			}
+			firstPoll = false
 			// Still running. Stop if the budget is spent; otherwise wait.
 			if time.Now().After(deadline) {
 				writeError("connector_runtime_error", fmt.Sprintf("run_query: timed out after %ds waiting for query %s to reach a terminal state (last state %q)", timeoutSeconds, queryID, state))
@@ -468,11 +473,12 @@ func runQuery(args map[string]any) {
 			time.Sleep(runQueryPollInterval)
 		}
 
-		// Stale-replay detected: re-issue once with a fresh time-nonce token
-		// (UnixNano, distinct per launch — not a deterministic counter, which
-		// would just re-wedge on another cached-failure token), then restart
+		// Stale-replay detected: re-issue once with a fresh token salted from the
+		// stale QueryExecutionId (a clock-free value distinct from the wedged
+		// token — not a deterministic counter, which would re-wedge, and not the
+		// frozen UnixNano wall clock, which cannot vary in-sandbox), then restart
 		// the poll loop against the new QueryExecutionId.
-		startArgs = withRetryNonce(args, time.Now().UnixNano())
+		startArgs = withRetryNonce(args, queryID)
 		retried = true
 	}
 }

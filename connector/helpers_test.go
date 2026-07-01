@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 // unmarshalBody round-trips a builder's []byte output back into a map so
@@ -1251,92 +1250,31 @@ func mustBuild(t *testing.T, build func(map[string]any) ([]byte, error), args ma
 	return b
 }
 
-// TestQueryExecutionSubmissionEpoch covers the SubmissionDateTime extractor the
-// run_query self-heal uses to date a terminal-failed execution. Athena emits
-// SubmissionDateTime over AWS-JSON as an epoch number, so after json.Unmarshal
-// it is a float64.
-func TestQueryExecutionSubmissionEpoch(t *testing.T) {
-	t.Run("numeric submission present", func(t *testing.T) {
-		resp := map[string]any{
-			"QueryExecution": map[string]any{
-				"Status": map[string]any{
-					"State":              "FAILED",
-					"SubmissionDateTime": 1719763200.5,
-				},
-			},
-		}
-		got, ok := queryExecutionSubmissionEpoch(resp)
-		if !ok || got != 1719763200.5 {
-			t.Fatalf("got (%v,%v), want (1719763200.5,true)", got, ok)
-		}
-	})
-	t.Run("parsed from JSON is float64", func(t *testing.T) {
-		var resp map[string]any
-		if err := json.Unmarshal([]byte(`{"QueryExecution":{"Status":{"SubmissionDateTime":1719763200.5}}}`), &resp); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		got, ok := queryExecutionSubmissionEpoch(resp)
-		if !ok || got != 1719763200.5 {
-			t.Fatalf("got (%v,%v), want (1719763200.5,true)", got, ok)
-		}
-	})
-	t.Run("missing yields not-ok", func(t *testing.T) {
-		if got, ok := queryExecutionSubmissionEpoch(map[string]any{}); ok || got != 0 {
-			t.Fatalf("got (%v,%v), want (0,false)", got, ok)
-		}
-	})
-	t.Run("non-numeric yields not-ok", func(t *testing.T) {
-		resp := map[string]any{
-			"QueryExecution": map[string]any{
-				"Status": map[string]any{"SubmissionDateTime": "not-a-number"},
-			},
-		}
-		if got, ok := queryExecutionSubmissionEpoch(resp); ok || got != 0 {
-			t.Fatalf("got (%v,%v), want (0,false)", got, ok)
-		}
-	})
-}
-
-// TestIsStaleReplay is the core discriminator: a terminal-failed execution
-// submitted before callStart (minus skew) is a replay Athena served from a
-// prior launch (re-issue), while one submitted at/after callStart is a genuine
-// fresh failure (return as-is, never double-execute).
-func TestIsStaleReplay(t *testing.T) {
-	callStart := time.Unix(1_000_000, 0)
-	skew := 5 * time.Second
-	epoch := func(tm time.Time) float64 {
-		return float64(tm.Unix()) + float64(tm.Nanosecond())/1e9
-	}
+// TestShouldReissueStaleReplay is the clock-free stale-replay discriminator: a
+// terminal FAILED/CANCELLED seen on run_query's FIRST GetQueryExecution poll is
+// Athena replaying a frozen prior execution (re-issue once), while one seen on a
+// later poll is a query this call actually ran to failure (return as-is, never
+// double-execute). It also encodes the self-heal gate (deterministic-token path
+// only) and the single-shot bound (never re-issue after already retrying).
+func TestShouldReissueStaleReplay(t *testing.T) {
 	cases := []struct {
-		name       string
-		submission time.Time
-		want       bool
+		name                         string
+		selfHeal, retried, firstPoll bool
+		want                         bool
 	}{
-		{"replay from an hour earlier is stale", callStart.Add(-time.Hour), true},
-		{"replay just beyond the skew margin is stale", callStart.Add(-skew - time.Second), true},
-		{"fresh failure submitted after callStart is not stale", callStart.Add(2 * time.Second), false},
-		{"fresh failure exactly at callStart is not stale", callStart, false},
-		{"within skew margin is not stale", callStart.Add(-skew + time.Second), false},
-		{"exactly at the skew boundary is not stale", callStart.Add(-skew), false},
+		{"first-poll terminal on deterministic path re-issues", true, false, true, true},
+		{"terminal on a later poll is a genuine failure", true, false, false, false},
+		{"already retried never re-issues (single-shot)", true, true, true, false},
+		{"explicit-token path never self-heals", false, false, true, false},
+		{"already retried and later poll never re-issues", true, true, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isStaleReplay(epoch(tc.submission), callStart, skew); got != tc.want {
-				t.Fatalf("isStaleReplay(%v) = %v, want %v", tc.submission, got, tc.want)
+			if got := shouldReissueStaleReplay(tc.selfHeal, tc.retried, tc.firstPoll); got != tc.want {
+				t.Fatalf("shouldReissueStaleReplay(%v,%v,%v) = %v, want %v",
+					tc.selfHeal, tc.retried, tc.firstPoll, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestEpochSecondsToTime proves the fractional-second component survives the
-// conversion (Athena stamps SubmissionDateTime with millisecond precision).
-func TestEpochSecondsToTime(t *testing.T) {
-	got := epochSecondsToTime(1719763200.5)
-	if got.Unix() != 1719763200 {
-		t.Fatalf("Unix() = %d, want 1719763200", got.Unix())
-	}
-	if ms := got.Nanosecond() / 1e6; ms < 499 || ms > 501 {
-		t.Fatalf("Nanosecond()/1e6 = %d, want ~500", ms)
 	}
 }
 
@@ -1365,20 +1303,23 @@ func TestUsesDeterministicToken(t *testing.T) {
 	}
 }
 
-// TestRetryNonceTokenDistinctness proves the self-heal escapes the trap: a
-// time-based nonce produces a distinct salt, and folding that salt through
-// deriveClientRequestToken yields a token distinct from both the no-salt
-// deterministic token and any other nonce's token. This is what makes each
-// launch's re-issue target a fresh execution instead of re-colliding on a
-// cached-failure token (as a deterministic retry counter would).
+// TestRetryNonceTokenDistinctness proves the self-heal escapes the trap: the
+// stale QueryExecutionId (a clock-free nonce) produces a distinct salt, and
+// folding that salt through deriveClientRequestToken yields a token distinct from
+// both the no-salt deterministic token and any other nonce's token. This is what
+// makes the first-poll-terminal re-issue target a fresh execution instead of
+// re-colliding on the cached-failure token (as a deterministic retry counter
+// would). The nonce is the returned stale QueryExecutionId precisely because
+// time.Now().UnixNano() is frozen in the clock-free wasip1 sandbox and cannot
+// supply a varying value.
 func TestRetryNonceTokenDistinctness(t *testing.T) {
 	payload := map[string]any{"QueryString": "SELECT 1"}
 	base := deriveClientRequestToken(payload, "")
 
-	saltA := retryNonceSalt(1719763200000000001)
-	saltB := retryNonceSalt(1719763200000000002)
+	saltA := retryNonceSalt("qexec-aaaaaaaa-1111")
+	saltB := retryNonceSalt("qexec-bbbbbbbb-2222")
 	if saltA == saltB {
-		t.Fatalf("distinct nonces produced identical salts: %q", saltA)
+		t.Fatalf("distinct query ids produced identical salts: %q", saltA)
 	}
 	if !strings.HasPrefix(saltA, "run_query.self-heal.retry-nonce:") {
 		t.Fatalf("salt %q missing namespace prefix", saltA)
@@ -1390,11 +1331,11 @@ func TestRetryNonceTokenDistinctness(t *testing.T) {
 		t.Fatalf("retry token collided with the no-salt token %q", base)
 	}
 	if tokenA == tokenB {
-		t.Fatalf("distinct nonces produced identical tokens: %q", tokenA)
+		t.Fatalf("distinct query ids produced identical tokens: %q", tokenA)
 	}
 
 	// Same nonce is reproducible (a pure function of the nonce).
-	if retryNonceSalt(42) != retryNonceSalt(42) {
+	if retryNonceSalt("qexec-aaaaaaaa-1111") != retryNonceSalt("qexec-aaaaaaaa-1111") {
 		t.Fatal("retryNonceSalt is not deterministic for a fixed nonce")
 	}
 }
@@ -1405,13 +1346,14 @@ func TestRetryNonceTokenDistinctness(t *testing.T) {
 // (folded from the nonce) without ever emitting the salt as a body member.
 func TestWithRetryNonce(t *testing.T) {
 	orig := map[string]any{"query_string": "SELECT 1"}
-	next := withRetryNonce(orig, 1719763200000000001)
+	staleID := "qexec-aaaaaaaa-1111"
+	next := withRetryNonce(orig, staleID)
 
 	if _, present := orig["idempotency_salt"]; present {
 		t.Fatal("withRetryNonce mutated the caller's original args")
 	}
-	if next["idempotency_salt"] != retryNonceSalt(1719763200000000001) {
-		t.Fatalf("copy salt = %v, want %v", next["idempotency_salt"], retryNonceSalt(1719763200000000001))
+	if next["idempotency_salt"] != retryNonceSalt(staleID) {
+		t.Fatalf("copy salt = %v, want %v", next["idempotency_salt"], retryNonceSalt(staleID))
 	}
 
 	baseBody := unmarshalBody(t, mustBuild(t, buildStartQueryExecution, orig))
@@ -1421,5 +1363,44 @@ func TestWithRetryNonce(t *testing.T) {
 	}
 	if _, leaked := retryBody["idempotency_salt"]; leaked {
 		t.Fatal("idempotency_salt leaked into the StartQueryExecution body")
+	}
+}
+
+// TestRunQueryFirstPollTerminalReissuesOnce is the regression guard for the
+// clock-free self-heal (issue #49): a first-poll terminal-FAILED replay on the
+// deterministic-token path must trigger exactly one re-issue whose derived
+// ClientRequestToken is distinct from the wedged one. It composes the two pure
+// pieces the wasip1-gated run_query loop wires together — the first-poll
+// discriminator and the queryID-salted re-issue — so the fix is covered without
+// the host ABI. Before the fix the discriminator compared a frozen 2022
+// time.Now() against a 2026 SubmissionDateTime and was always false; here it
+// keys only on poll ordinality and a clock-free QueryExecutionId nonce.
+func TestRunQueryFirstPollTerminalReissuesOnce(t *testing.T) {
+	args := map[string]any{"query_string": "SELECT 1"}
+	selfHeal := usesDeterministicToken(args)
+	if !selfHeal {
+		t.Fatal("bare deterministic args should take the self-heal path")
+	}
+
+	// First poll already terminal-FAILED on the self-heal path, not yet retried:
+	// re-issue.
+	if !shouldReissueStaleReplay(selfHeal, false /*retried*/, true /*firstPoll*/) {
+		t.Fatal("first-poll terminal on the deterministic path must re-issue")
+	}
+
+	// The re-issue is salted from the stale QueryExecutionId, yielding a token
+	// distinct from the original (wedged) execution's token.
+	staleID := "qexec-wedged-failure-0001"
+	reissueArgs := withRetryNonce(args, staleID)
+	baseToken := unmarshalBody(t, mustBuild(t, buildStartQueryExecution, args))["ClientRequestToken"]
+	reissueToken := unmarshalBody(t, mustBuild(t, buildStartQueryExecution, reissueArgs))["ClientRequestToken"]
+	if baseToken == reissueToken {
+		t.Fatal("re-issue reused the wedged ClientRequestToken; the frozen failure would replay forever")
+	}
+
+	// Exactly once: after retrying, a second first-poll terminal must NOT
+	// re-issue (single-shot bound — the genuine re-run failure is returned).
+	if shouldReissueStaleReplay(selfHeal, true /*retried*/, true /*firstPoll*/) {
+		t.Fatal("self-heal must re-issue at most once")
 	}
 }
