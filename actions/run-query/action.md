@@ -143,6 +143,29 @@ without being sent to Athena), or supply its own `client_request_token`.
 This is what makes the action safe to declare idempotent: replaying the
 same request does not spawn duplicate work.
 
+Dedup is the right default for a `SUCCEEDED` re-run (no duplicate Athena
+scan or cost), but Athena's idempotency also replays a *terminal-failed*
+execution: once the deterministic token first produced a `FAILED` or
+`CANCELLED` execution, every bare re-launch of the same request returns
+that same frozen failure (identical `QueryExecutionId`), so a transient
+error that has since been fixed would never re-run. `run-query`
+self-heals this on the deterministic-token path (no `client_request_token`,
+no `idempotency_salt`): when the poll loop reaches a terminal `FAILED` or
+`CANCELLED` execution whose `SubmissionDateTime` predates this call — proof
+Athena replayed a pre-existing execution rather than one this call started —
+it re-issues StartQueryExecution **once** with a fresh time-nonce token and
+polls the new execution. A genuinely fresh failure (submitted at or after
+this call started) is returned as-is, so real failures are never
+double-executed, and the single re-issue caps cost and rules out an
+infinite loop. Net effect: a successful re-launch still returns the same
+result with no salt; a re-launch after a since-fixed failure re-executes
+automatically with no salt; and `idempotency_salt` remains the explicit
+override to force a fresh execution of an otherwise-identical `SUCCEEDED`
+request. (This self-heal is a `run-query` property: the async
+`start-query-execution` op returns immediately and structurally cannot
+observe the outcome within one call, so it keeps the plain deterministic
+token.)
+
 If Athena replies with a 400 `IDEMPOTENT_PARAMETER_MISMATCH` on the
 internal StartQueryExecution call, the derived token collided with a prior
 execution that used the same logical request but different parameters —

@@ -19,7 +19,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -692,6 +694,99 @@ func queryExecutionStatus(resp map[string]any) (state, reason string) {
 	state, _ = status["State"].(string)
 	reason, _ = status["StateChangeReason"].(string)
 	return state, reason
+}
+
+// queryExecutionSubmissionEpoch extracts QueryExecution.Status.SubmissionDateTime
+// from a parsed GetQueryExecution response. Athena returns this field over
+// AWS-JSON as an epoch number (seconds since the Unix epoch, with a fractional
+// millisecond component), so after json.Unmarshal into a map it is a float64.
+// The bool reports whether a numeric value was present: a missing or
+// non-numeric field yields (0, false), which the run_query self-heal treats as
+// "cannot prove a stale replay" and therefore does not re-issue. Pure and host
+// unit-testable.
+func queryExecutionSubmissionEpoch(resp map[string]any) (epochSeconds float64, ok bool) {
+	exec, _ := resp["QueryExecution"].(map[string]any)
+	status, _ := exec["Status"].(map[string]any)
+	epochSeconds, ok = status["SubmissionDateTime"].(float64)
+	return epochSeconds, ok
+}
+
+// runQueryReplaySkew is the clock-skew margin the stale-replay discriminator
+// allows between the connector host's wall clock and the SubmissionDateTime
+// Athena stamps on an execution. A terminal-failed execution is treated as a
+// stale replay (safe to re-issue) only when its submission predates the current
+// call's StartQueryExecution by more than this margin; a genuinely fresh
+// failure submitted at (or just before) callStart stays within the margin and
+// is returned as-is, so genuine failures are never double-executed. The margin
+// errs toward NOT self-healing, which is the conservative default.
+const runQueryReplaySkew = 5 * time.Second
+
+// isStaleReplay reports whether a terminal-failed execution's SubmissionDateTime
+// proves Athena replayed a pre-existing failure rather than running a query this
+// call started. It is true only when the submission time (epoch seconds) is
+// earlier than callStart minus the skew margin. A query this call actually
+// started is submitted at (or shortly after) callStart, so it never satisfies
+// this predicate; an execution frozen by a prior launch was submitted well
+// before callStart and does. Pure and host unit-testable — the run_query
+// re-issue loop that acts on it stays wasip1-gated in main.go.
+func isStaleReplay(submissionEpochSeconds float64, callStart time.Time, skew time.Duration) bool {
+	submitted := epochSecondsToTime(submissionEpochSeconds)
+	return submitted.Before(callStart.Add(-skew))
+}
+
+// epochSecondsToTime converts an epoch-seconds value carrying a fractional
+// sub-second component (as Athena emits SubmissionDateTime over AWS-JSON) into a
+// time.Time, preserving the fractional part as nanoseconds. Pure and host
+// unit-testable.
+func epochSecondsToTime(epochSeconds float64) time.Time {
+	sec := int64(epochSeconds)
+	nsec := int64((epochSeconds - float64(sec)) * 1e9)
+	return time.Unix(sec, nsec)
+}
+
+// usesDeterministicToken reports whether a run_query call takes the
+// deterministic-token path, i.e. the caller supplied neither a non-empty
+// client_request_token nor a non-empty idempotency_salt. Only on that path can a
+// terminal-failed execution be a stale replay of the connector's own
+// synthesized token, so this gates run_query's self-heal: an explicit token or
+// salt means the caller is driving idempotency deliberately and the connector
+// must not second-guess it. Pure and host unit-testable.
+func usesDeterministicToken(args map[string]any) bool {
+	if token, ok := args["client_request_token"].(string); ok && token != "" {
+		return false
+	}
+	if salt, ok := optionalString(args, "idempotency_salt"); ok && salt != "" {
+		return false
+	}
+	return true
+}
+
+// retryNonceSalt maps a time-based nonce (time.Now().UnixNano()) to a
+// namespaced idempotency_salt string used only for run_query's internal
+// self-heal re-issue. Feeding it through the existing salt-fold path
+// (deriveClientRequestToken) yields a fresh deterministic token per nonce — the
+// salt is never emitted as a StartQueryExecution body member. Because each
+// launch's nonce is distinct, the retry token is distinct across launches too,
+// so a re-issue cannot re-collide on another cached-failure token the way a
+// deterministic retry counter would. The prefix domain-separates these internal
+// salts from any value an operator might pass. Pure and host unit-testable.
+func retryNonceSalt(nonce int64) string {
+	return "run_query.self-heal.retry-nonce:" + strconv.FormatInt(nonce, 10)
+}
+
+// withRetryNonce returns a shallow copy of a run_query args map with
+// idempotency_salt set to retryNonceSalt(nonce), leaving the caller's original
+// map untouched. Rebuilding the StartQueryExecution body from the copy folds the
+// nonce into the derived idempotency token, so the self-heal re-issue targets a
+// fresh execution instead of Athena's frozen terminal-failed one. Pure and host
+// unit-testable; the host re-issue is the wasip1-gated caller.
+func withRetryNonce(args map[string]any, nonce int64) map[string]any {
+	next := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		next[k] = v
+	}
+	next["idempotency_salt"] = retryNonceSalt(nonce)
+	return next
 }
 
 // resultPage extracts the ResultSet object and the top-level NextToken from a

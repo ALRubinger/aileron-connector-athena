@@ -243,6 +243,29 @@ work-group result location that changed between runs), Athena returns a
 of this touches the ADR-0010 `idempotent = true` declarations: the default
 behavior is unchanged.
 
+Deterministic dedup is correct for a `SUCCEEDED` re-run, but Athena's
+idempotency also replays a *terminal-failed* execution: once the derived
+token first produced a `FAILED`/`CANCELLED` execution, every bare
+re-launch returns that same frozen failure (identical `QueryExecutionId`),
+so a transient error that has since been fixed would never re-run — the
+only escape being a hand-passed `idempotency_salt`. `run_query` removes
+that trap by self-healing on the deterministic-token path (no
+`client_request_token`, no `idempotency_salt`): when it polls a terminal
+`FAILED`/`CANCELLED` execution whose `SubmissionDateTime` predates the
+current call — proof Athena replayed a pre-existing execution rather than
+one this call started — it re-issues `StartQueryExecution` **once** with a
+fresh time-nonce token and polls the new execution. A genuinely fresh
+failure (submitted at or after the call started) is returned as-is, so
+real failures are never double-executed and the single re-issue rules out
+an infinite loop. Net effect: a successful re-launch returns the same
+result with no salt (unchanged); a re-launch after a since-fixed failure
+re-executes automatically with no salt (fixed); and `idempotency_salt`
+stays as the explicit override to force a fresh execution of an
+otherwise-identical `SUCCEEDED` request. The self-heal is a `run_query`
+property only — the async `start_query_execution` op returns immediately
+and structurally cannot observe the outcome within one call, so it keeps
+the plain deterministic token.
+
 ## Async start, poll, results flow
 
 Athena query execution is asynchronous. The pattern is start, poll, then
@@ -276,7 +299,10 @@ caller. It internalizes the whole lifecycle in one synchronous op:
    a terminal state, bounded by an overall budget (`timeout_seconds`,
    default 180). A still-`QUEUED`/`RUNNING` query at the deadline fails
    with `connector_runtime_error`; a `FAILED`/`CANCELLED` execution fails
-   with `external_api_error` carrying Athena's `StateChangeReason`.
+   with `external_api_error` carrying Athena's `StateChangeReason` — unless
+   it is a stale replay of a pre-existing failure on the deterministic-token
+   path, in which case `run_query` self-heals by re-issuing once with a
+   fresh token (see the idempotency discussion under [Operations](#operations)).
 3. On `SUCCEEDED`, page `GetQueryResults` to completion, concatenating the
    rows (the column header appears once, on the first page) and keeping
    `ResultSetMetadata` once.

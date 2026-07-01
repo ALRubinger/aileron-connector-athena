@@ -357,77 +357,123 @@ func runQuery(args map[string]any) {
 		return
 	}
 
-	// Build + start. buildStartQueryExecution applies the read-only gate
-	// before any host call, so a non-read QueryString fails here.
-	startBody, err := buildStartQueryExecution(args)
-	if err != nil {
-		writeError("connector_runtime_error", "run_query: "+err.Error())
-		return
-	}
-	startResp, status, err := doSignedAthena(region, "StartQueryExecution", startBody)
-	if err != nil {
-		writeError("connector_runtime_error", "run_query: "+err.Error())
-		return
-	}
-	if status < 200 || status >= 300 {
-		// Same StartQueryExecution-scoped IDEMPOTENT_PARAMETER_MISMATCH
-		// rewrite as the async start_query_execution path; the run_query
-		// prefix is kept so the message names the orchestration op.
-		writeError("external_api_error", "run_query: "+startQueryExecutionErrorMessage(status, startResp))
-		return
-	}
-	var started map[string]any
-	if err := json.Unmarshal(startResp, &started); err != nil {
-		writeError("connector_runtime_error", "run_query: parse StartQueryExecution: "+err.Error())
-		return
-	}
-	queryID, _ := started["QueryExecutionId"].(string)
-	if queryID == "" {
-		writeError("external_api_error", "run_query: StartQueryExecution returned no QueryExecutionId")
-		return
-	}
-
-	// Poll to a terminal state, bounded by the overall deadline.
-	getExecBody, err := buildGetQueryExecution(map[string]any{"query_execution_id": queryID})
-	if err != nil {
-		writeError("connector_runtime_error", "run_query: "+err.Error())
-		return
-	}
+	// Self-heal is a run_query property: on the deterministic-token path (no
+	// explicit client_request_token, no idempotency_salt) Athena idempotently
+	// replays whatever execution the synthesized token first produced —
+	// including a terminal FAILED/CANCELLED one — so a bare re-launch after a
+	// since-fixed transient failure would return the frozen failure forever.
+	// When the terminal-failed execution's SubmissionDateTime predates this
+	// call (proving it is a replay, not a query this call started), re-issue
+	// ONCE with a fresh time-nonce token and poll the new execution. A
+	// genuinely fresh failure is returned as-is (not double-executed), and the
+	// single-shot bound means no infinite loop. The async start_query_execution
+	// op cannot observe the outcome within one call and so keeps the plain
+	// deterministic token; idempotency_salt remains the explicit override to
+	// force a fresh execution of an otherwise-identical SUCCEEDED request.
+	selfHeal := usesDeterministicToken(args)
 	timeoutSeconds := resolveTimeoutSeconds(args)
-	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+
+	startArgs := args
+	retried := false
 	for {
-		execResp, status, err := doSignedAthena(region, "GetQueryExecution", getExecBody)
+		// callStart bounds the stale-replay discriminator: a failed execution
+		// submitted before this instant (minus a skew margin) is one Athena
+		// replayed, not one this StartQueryExecution actually launched.
+		callStart := time.Now()
+
+		// Build + start. buildStartQueryExecution applies the read-only gate
+		// before any host call, so a non-read QueryString fails here.
+		startBody, err := buildStartQueryExecution(startArgs)
+		if err != nil {
+			writeError("connector_runtime_error", "run_query: "+err.Error())
+			return
+		}
+		startResp, status, err := doSignedAthena(region, "StartQueryExecution", startBody)
 		if err != nil {
 			writeError("connector_runtime_error", "run_query: "+err.Error())
 			return
 		}
 		if status < 200 || status >= 300 {
-			writeError("external_api_error", fmt.Sprintf("run_query: GetQueryExecution returned %d: %s", status, string(execResp)))
+			// Same StartQueryExecution-scoped IDEMPOTENT_PARAMETER_MISMATCH
+			// rewrite as the async start_query_execution path; the run_query
+			// prefix is kept so the message names the orchestration op.
+			writeError("external_api_error", "run_query: "+startQueryExecutionErrorMessage(status, startResp))
 			return
 		}
-		var parsed map[string]any
-		if err := json.Unmarshal(execResp, &parsed); err != nil {
-			writeError("connector_runtime_error", "run_query: parse GetQueryExecution: "+err.Error())
+		var started map[string]any
+		if err := json.Unmarshal(startResp, &started); err != nil {
+			writeError("connector_runtime_error", "run_query: parse StartQueryExecution: "+err.Error())
 			return
 		}
-		state, reason := queryExecutionStatus(parsed)
-		switch classifyQueryState(state) {
-		case queryStateSucceeded:
-			runQueryFetchResults(region, queryID)
-			return
-		case queryStateFailed, queryStateCancelled:
-			writeError("external_api_error", fmt.Sprintf("run_query: query %s reached terminal state %s: %s", queryID, state, reason))
-			return
-		case queryStateUnknown:
-			writeError("external_api_error", fmt.Sprintf("run_query: query %s returned unexpected state %q", queryID, state))
+		queryID, _ := started["QueryExecutionId"].(string)
+		if queryID == "" {
+			writeError("external_api_error", "run_query: StartQueryExecution returned no QueryExecutionId")
 			return
 		}
-		// Still running. Stop if the budget is spent; otherwise wait.
-		if time.Now().After(deadline) {
-			writeError("connector_runtime_error", fmt.Sprintf("run_query: timed out after %ds waiting for query %s to reach a terminal state (last state %q)", timeoutSeconds, queryID, state))
+
+		// Poll to a terminal state, bounded by the overall deadline.
+		getExecBody, err := buildGetQueryExecution(map[string]any{"query_execution_id": queryID})
+		if err != nil {
+			writeError("connector_runtime_error", "run_query: "+err.Error())
 			return
 		}
-		time.Sleep(runQueryPollInterval)
+		deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+		reissue := false
+		for {
+			execResp, status, err := doSignedAthena(region, "GetQueryExecution", getExecBody)
+			if err != nil {
+				writeError("connector_runtime_error", "run_query: "+err.Error())
+				return
+			}
+			if status < 200 || status >= 300 {
+				writeError("external_api_error", fmt.Sprintf("run_query: GetQueryExecution returned %d: %s", status, string(execResp)))
+				return
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal(execResp, &parsed); err != nil {
+				writeError("connector_runtime_error", "run_query: parse GetQueryExecution: "+err.Error())
+				return
+			}
+			state, reason := queryExecutionStatus(parsed)
+			switch classifyQueryState(state) {
+			case queryStateSucceeded:
+				runQueryFetchResults(region, queryID)
+				return
+			case queryStateFailed, queryStateCancelled:
+				// Self-heal only on the deterministic-token path, only once,
+				// and only when SubmissionDateTime proves a stale replay. A
+				// still-RUNNING replay is not handled here — it stays in the
+				// poll loop below, so a legitimate concurrent in-flight dedup
+				// is polled to completion rather than re-issued.
+				submission, hasSubmission := queryExecutionSubmissionEpoch(parsed)
+				if selfHeal && !retried && hasSubmission &&
+					isStaleReplay(submission, callStart, runQueryReplaySkew) {
+					reissue = true
+					break
+				}
+				writeError("external_api_error", fmt.Sprintf("run_query: query %s reached terminal state %s: %s", queryID, state, reason))
+				return
+			case queryStateUnknown:
+				writeError("external_api_error", fmt.Sprintf("run_query: query %s returned unexpected state %q", queryID, state))
+				return
+			}
+			if reissue {
+				break
+			}
+			// Still running. Stop if the budget is spent; otherwise wait.
+			if time.Now().After(deadline) {
+				writeError("connector_runtime_error", fmt.Sprintf("run_query: timed out after %ds waiting for query %s to reach a terminal state (last state %q)", timeoutSeconds, queryID, state))
+				return
+			}
+			time.Sleep(runQueryPollInterval)
+		}
+
+		// Stale-replay detected: re-issue once with a fresh time-nonce token
+		// (UnixNano, distinct per launch — not a deterministic counter, which
+		// would just re-wedge on another cached-failure token), then restart
+		// the poll loop against the new QueryExecutionId.
+		startArgs = withRetryNonce(args, time.Now().UnixNano())
+		retried = true
 	}
 }
 
